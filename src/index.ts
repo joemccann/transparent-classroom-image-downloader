@@ -209,28 +209,70 @@ async function scrapePhotos(page: Page, childId: string): Promise<PhotoInfo[]> {
 
   console.log(`Finished scrolling after ${scrollAttempts} attempts`);
 
-  // Extract photo information from the page
-  const photos = await page.evaluate(() => {
-    const photoElements = document.querySelectorAll('img[src*="transparentclassroom.com"]');
-    const results: { url: string; caption: string | null }[] = [];
+  // Debug: Log current URL to verify we're on the right page
+  const currentUrl = page.url();
+  console.log(`Current URL after scrolling: ${currentUrl}`);
 
-    photoElements.forEach((img) => {
-      const src = (img as HTMLImageElement).src;
-      // Only include actual photo URLs (from S3 with posts path)
-      if (src.includes('/posts/') && src.includes('.large.')) {
-        // Try to find a caption nearby
-        const parent = img.closest('.photo, .post, [class*="photo"]');
-        let caption: string | null = null;
-        if (parent) {
-          const captionEl = parent.querySelector('.caption, .description, p');
-          caption = captionEl?.textContent?.trim() || null;
-        }
-        results.push({ url: src, caption });
-      }
+  // Debug: Check if we're authenticated (not redirected to login)
+  if (currentUrl.includes('/sign_in') || currentUrl.includes('/login')) {
+    console.log('ERROR: Redirected to login page - session may have expired');
+    return [];
+  }
+
+  // Debug: Count all images on page
+  const allImagesDebug = await page.evaluate(() => {
+    const allImgs = document.querySelectorAll('img');
+    const urls: string[] = [];
+    allImgs.forEach(img => {
+      const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+      if (src) urls.push(src.substring(0, 100));
     });
+    return { count: allImgs.length, sampleUrls: urls.slice(0, 10) };
+  });
+  console.log(`Debug: Found ${allImagesDebug.count} total images on page`);
+  console.log(`Debug: Sample URLs:`, allImagesDebug.sampleUrls);
+
+  // Extract photo information from the page - try multiple selectors
+  const photos = await page.evaluate(() => {
+    // Try multiple selectors for finding photo images
+    const selectors = [
+      'img[src*="transparentclassroom.com"]',
+      'img[src*="s3.amazonaws.com"]',
+      'img[data-src*="transparentclassroom.com"]',
+      'img[data-src*="s3.amazonaws.com"]',
+      '.photo img',
+      '.post img',
+    ];
+
+    const results: { url: string; caption: string | null }[] = [];
+    const seen = new Set<string>();
+
+    for (const selector of selectors) {
+      const photoElements = document.querySelectorAll(selector);
+      photoElements.forEach((img) => {
+        const src = (img as HTMLImageElement).src || img.getAttribute('data-src') || '';
+        // Only include actual photo URLs (from S3 with posts path)
+        if (src && !seen.has(src) && src.includes('/posts/')) {
+          seen.add(src);
+          // Try to find a caption nearby
+          const parent = img.closest('.photo, .post, [class*="photo"]');
+          let caption: string | null = null;
+          if (parent) {
+            const captionEl = parent.querySelector('.caption, .description, p');
+            caption = captionEl?.textContent?.trim() || null;
+          }
+          results.push({ url: src, caption });
+        }
+      });
+    }
 
     return results;
   });
+
+  console.log(`Found ${photos.length} photos with /posts/ in URL`);
+  if (photos.length > 0) {
+    console.log(`Sample photo URL: ${photos[0].url.substring(0, 100)}`);
+  }
 
   // Process photos to extract hashes and dates
   const processedPhotos: PhotoInfo[] = photos
