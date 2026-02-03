@@ -39,6 +39,13 @@ interface PhotoInfo {
   caption: string | null;
 }
 
+interface ScrapeResult {
+  photos: PhotoInfo[];
+  expectedTotal: number;
+  scrapedTotal: number;
+  isComplete: boolean;
+}
+
 function loadState(): DownloadState {
   try {
     const data = fs.readFileSync(CONFIG.stateFilePath, 'utf-8');
@@ -174,67 +181,32 @@ async function performInteractiveLogin(browser: Browser): Promise<boolean> {
   return false;
 }
 
-async function scrapePhotos(page: Page, childId: string): Promise<PhotoInfo[]> {
-  const photosUrl = `${CONFIG.baseUrl}/s/${CONFIG.schoolId}/children/${childId}/photos?locale=en`;
+async function getPageMetadata(page: Page): Promise<{ totalPhotos: number; maxPage: number }> {
+  return await page.evaluate(() => {
+    // Get total photo count from .page_info element (e.g., "465 Photos")
+    const pageInfo = document.querySelector('.page_info');
+    const totalMatch = pageInfo?.textContent?.match(/(\d+)\s*Photos?/i);
+    const totalPhotos = totalMatch ? parseInt(totalMatch[1], 10) : 0;
 
-  console.log(`Navigating to photos page for child ${childId}...`);
-  await page.goto(photosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-  // Wait for photos to load
-  await new Promise(resolve => setTimeout(resolve, 3000));
-
-  // Scroll to load all photos (lazy loading)
-  let previousHeight = 0;
-  let scrollAttempts = 0;
-  const maxScrollAttempts = 50;
-
-  while (scrollAttempts < maxScrollAttempts) {
-    const currentHeight = await page.evaluate(() => document.body.scrollHeight);
-
-    if (currentHeight === previousHeight) {
-      // Try scrolling one more time to be sure
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      const newHeight = await page.evaluate(() => document.body.scrollHeight);
-      if (newHeight === currentHeight) {
-        break;
+    // Get max page number from pagination
+    const paginationLinks = document.querySelectorAll('.pagination a, .pagination-container a');
+    let maxPage = 1;
+    paginationLinks.forEach(link => {
+      const pageNum = parseInt(link.textContent || '0', 10);
+      if (!isNaN(pageNum) && pageNum > maxPage) {
+        maxPage = pageNum;
       }
-    }
-
-    previousHeight = currentHeight;
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    scrollAttempts++;
-  }
-
-  console.log(`Finished scrolling after ${scrollAttempts} attempts`);
-
-  // Debug: Log current URL to verify we're on the right page
-  const currentUrl = page.url();
-  console.log(`Current URL after scrolling: ${currentUrl}`);
-
-  // Debug: Check if we're authenticated (not redirected to login)
-  if (currentUrl.includes('/sign_in') || currentUrl.includes('/login')) {
-    console.log('ERROR: Redirected to login page - session may have expired');
-    return [];
-  }
-
-  // Debug: Count all images on page
-  const allImagesDebug = await page.evaluate(() => {
-    const allImgs = document.querySelectorAll('img');
-    const urls: string[] = [];
-    allImgs.forEach(img => {
-      const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
-      if (src) urls.push(src.substring(0, 100));
     });
-    return { count: allImgs.length, sampleUrls: urls.slice(0, 10) };
-  });
-  console.log(`Debug: Found ${allImagesDebug.count} total images on page`);
-  console.log(`Debug: Sample URLs:`, allImagesDebug.sampleUrls);
 
-  // Extract photo information from the page - try multiple selectors
-  const photos = await page.evaluate(() => {
-    // Try multiple selectors for finding photo images
+    return { totalPhotos, maxPage };
+  });
+}
+
+async function scrapePhotosFromCurrentPage(page: Page): Promise<{ url: string; caption: string | null }[]> {
+  // Wait for images to load
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  return await page.evaluate(() => {
     const selectors = [
       'img[src*="transparentclassroom.com"]',
       'img[src*="s3.amazonaws.com"]',
@@ -251,10 +223,8 @@ async function scrapePhotos(page: Page, childId: string): Promise<PhotoInfo[]> {
       const photoElements = document.querySelectorAll(selector);
       photoElements.forEach((img) => {
         const src = (img as HTMLImageElement).src || img.getAttribute('data-src') || '';
-        // Only include actual photo URLs (from S3 with posts path)
         if (src && !seen.has(src) && src.includes('/posts/')) {
           seen.add(src);
-          // Try to find a caption nearby
           const parent = img.closest('.photo, .post, [class*="photo"]');
           let caption: string | null = null;
           if (parent) {
@@ -268,14 +238,70 @@ async function scrapePhotos(page: Page, childId: string): Promise<PhotoInfo[]> {
 
     return results;
   });
+}
 
-  console.log(`Found ${photos.length} photos with /posts/ in URL`);
-  if (photos.length > 0) {
-    console.log(`Sample photo URL: ${photos[0].url.substring(0, 100)}`);
+async function scrapePhotos(page: Page, childId: string, childName: string): Promise<ScrapeResult> {
+  const basePhotosUrl = `${CONFIG.baseUrl}/s/${CONFIG.schoolId}/children/${childId}/photos?locale=en`;
+
+  console.log(`\nNavigating to photos page for ${childName} (${childId})...`);
+  await page.goto(basePhotosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+  // Wait for page to fully load
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
+  // Check if redirected to login
+  const currentUrl = page.url();
+  if (currentUrl.includes('/sign_in') || currentUrl.includes('/login')) {
+    console.log('ERROR: Redirected to login page - session may have expired');
+    return { photos: [], expectedTotal: 0, scrapedTotal: 0, isComplete: false };
   }
 
+  // Get metadata (total photos and max page)
+  const { totalPhotos, maxPage } = await getPageMetadata(page);
+  console.log(`Expected total: ${totalPhotos} photos across ${maxPage} pages`);
+
+  if (totalPhotos === 0) {
+    console.log('WARNING: Could not determine total photo count from page');
+  }
+
+  // Collect photos from all pages
+  const allPhotos: { url: string; caption: string | null }[] = [];
+  const seenUrls = new Set<string>();
+
+  for (let pageNum = 1; pageNum <= maxPage; pageNum++) {
+    if (pageNum > 1) {
+      // Navigate to next page
+      const pageUrl = `${basePhotosUrl}&page=${pageNum}`;
+      console.log(`  Scraping page ${pageNum}/${maxPage}...`);
+      await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    } else {
+      console.log(`  Scraping page ${pageNum}/${maxPage}...`);
+    }
+
+    // Scrape photos from current page
+    const pagePhotos = await scrapePhotosFromCurrentPage(page);
+
+    // Add unique photos
+    for (const photo of pagePhotos) {
+      if (!seenUrls.has(photo.url)) {
+        seenUrls.add(photo.url);
+        allPhotos.push(photo);
+      }
+    }
+
+    console.log(`    Found ${pagePhotos.length} photos on page ${pageNum} (${allPhotos.length} total so far)`);
+
+    // Small delay between pages to be nice to the server
+    if (pageNum < maxPage) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+
+  console.log(`\nFinished scraping all ${maxPage} pages`);
+  console.log(`Total photos scraped: ${allPhotos.length}`);
+
   // Process photos to extract hashes and dates
-  const processedPhotos: PhotoInfo[] = photos
+  const processedPhotos: PhotoInfo[] = allPhotos
     .map(photo => {
       const hash = extractHashFromUrl(photo.url);
       const date = extractDateFromUrl(photo.url);
@@ -296,20 +322,47 @@ async function scrapePhotos(page: Page, childId: string): Promise<PhotoInfo[]> {
     new Map(processedPhotos.map(p => [p.hash, p])).values()
   );
 
-  console.log(`Found ${uniquePhotos.length} unique photos for child ${childId}`);
-  return uniquePhotos;
+  const scrapedTotal = uniquePhotos.length;
+  const isComplete = totalPhotos === 0 || scrapedTotal >= totalPhotos;
+
+  // Validation check
+  if (totalPhotos > 0 && scrapedTotal < totalPhotos) {
+    const missing = totalPhotos - scrapedTotal;
+    const pct = ((scrapedTotal / totalPhotos) * 100).toFixed(1);
+    console.log(`\n⚠️  WARNING: Photo count mismatch for ${childName}!`);
+    console.log(`   Expected: ${totalPhotos}, Scraped: ${scrapedTotal} (${pct}%)`);
+    console.log(`   Missing: ${missing} photos`);
+  } else if (totalPhotos > 0) {
+    console.log(`✅ Validation passed: All ${totalPhotos} photos scraped for ${childName}`);
+  }
+
+  return {
+    photos: uniquePhotos,
+    expectedTotal: totalPhotos,
+    scrapedTotal,
+    isComplete,
+  };
+}
+
+interface DownloadResult {
+  downloaded: number;
+  expectedTotal: number;
+  scrapedTotal: number;
+  isComplete: boolean;
 }
 
 async function downloadPhotosForChild(
   page: Page,
   childKey: 'cole' | 'isla',
   state: DownloadState
-): Promise<number> {
+): Promise<DownloadResult> {
   const child = CONFIG.children[childKey];
   const childState = state.children[childKey];
   const downloadedSet = new Set(childState.downloadedHashes);
 
-  console.log(`\n=== Processing photos for ${child.name} ===`);
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`Processing photos for ${child.name}`);
+  console.log(`${'='.repeat(50)}`);
   console.log(`Previously downloaded: ${downloadedSet.size} photos`);
 
   // Ensure output directory exists
@@ -317,16 +370,21 @@ async function downloadPhotosForChild(
     fs.mkdirSync(child.outputDir, { recursive: true });
   }
 
-  // Scrape photos from the page
-  const photos = await scrapePhotos(page, child.id);
+  // Scrape photos from all pages
+  const scrapeResult = await scrapePhotos(page, child.id, child.name);
 
   // Filter to only new photos
-  const newPhotos = photos.filter(p => !downloadedSet.has(p.hash));
-  console.log(`New photos to download: ${newPhotos.length}`);
+  const newPhotos = scrapeResult.photos.filter(p => !downloadedSet.has(p.hash));
+  console.log(`\nNew photos to download: ${newPhotos.length}`);
 
   if (newPhotos.length === 0) {
     console.log('No new photos to download');
-    return 0;
+    return {
+      downloaded: 0,
+      expectedTotal: scrapeResult.expectedTotal,
+      scrapedTotal: scrapeResult.scrapedTotal,
+      isComplete: scrapeResult.isComplete,
+    };
   }
 
   let downloadedCount = 0;
@@ -369,13 +427,23 @@ async function downloadPhotosForChild(
     childState.lastDownloadedAt = new Date().toISOString();
   }
 
-  console.log(`Downloaded ${downloadedCount} photos for ${child.name}`);
-  return downloadedCount;
+  console.log(`\nDownloaded ${downloadedCount} new photos for ${child.name}`);
+  console.log(`Total in library: ${childState.downloadedHashes.length} photos`);
+
+  return {
+    downloaded: downloadedCount,
+    expectedTotal: scrapeResult.expectedTotal,
+    scrapedTotal: scrapeResult.scrapedTotal,
+    isComplete: scrapeResult.isComplete,
+  };
 }
 
 interface DownloadSummary {
   childName: string;
   count: number;
+  expectedTotal: number;
+  scrapedTotal: number;
+  isComplete: boolean;
 }
 
 async function main(): Promise<void> {
@@ -452,13 +520,18 @@ async function main(): Promise<void> {
 
       // Download photos for each child
       let totalDownloaded = 0;
+      let hasValidationWarnings = false;
 
       for (const childKey of ['cole', 'isla'] as const) {
-        const downloaded = await downloadPhotosForChild(downloadPage, childKey, state);
-        totalDownloaded += downloaded;
+        const result = await downloadPhotosForChild(downloadPage, childKey, state);
+        totalDownloaded += result.downloaded;
+        if (!result.isComplete) hasValidationWarnings = true;
         downloadSummaries.push({
           childName: CONFIG.children[childKey].name,
-          count: downloaded,
+          count: result.downloaded,
+          expectedTotal: result.expectedTotal,
+          scrapedTotal: result.scrapedTotal,
+          isComplete: result.isComplete,
         });
       }
 
@@ -466,9 +539,20 @@ async function main(): Promise<void> {
       state.lastRun = new Date().toISOString();
       saveState(state);
 
-      console.log(`\n=== Complete ===`);
-      console.log(`Total photos downloaded: ${totalDownloaded}`);
+      // Print final summary
+      console.log(`\n${'='.repeat(50)}`);
+      console.log('FINAL SUMMARY');
+      console.log(`${'='.repeat(50)}`);
+      for (const summary of downloadSummaries) {
+        const status = summary.isComplete ? '✅' : '⚠️';
+        console.log(`${status} ${summary.childName}: ${summary.scrapedTotal}/${summary.expectedTotal} photos scraped, ${summary.count} new downloaded`);
+      }
+      console.log(`\nTotal photos downloaded this run: ${totalDownloaded}`);
       console.log(`State saved to: ${CONFIG.stateFilePath}`);
+
+      if (hasValidationWarnings) {
+        console.log('\n⚠️  Some children have incomplete photo counts. Check logs above for details.');
+      }
 
       if (totalDownloaded > 0) {
         sendNotification(
@@ -550,13 +634,18 @@ async function main(): Promise<void> {
 
       // Download photos for each child
       let totalDownloaded = 0;
+      let hasValidationWarnings = false;
 
       for (const childKey of ['cole', 'isla'] as const) {
-        const downloaded = await downloadPhotosForChild(downloadPage, childKey, state);
-        totalDownloaded += downloaded;
+        const result = await downloadPhotosForChild(downloadPage, childKey, state);
+        totalDownloaded += result.downloaded;
+        if (!result.isComplete) hasValidationWarnings = true;
         downloadSummaries.push({
           childName: CONFIG.children[childKey].name,
-          count: downloaded,
+          count: result.downloaded,
+          expectedTotal: result.expectedTotal,
+          scrapedTotal: result.scrapedTotal,
+          isComplete: result.isComplete,
         });
       }
 
@@ -564,9 +653,20 @@ async function main(): Promise<void> {
       state.lastRun = new Date().toISOString();
       saveState(state);
 
-      console.log(`\n=== Complete ===`);
-      console.log(`Total photos downloaded: ${totalDownloaded}`);
+      // Print final summary
+      console.log(`\n${'='.repeat(50)}`);
+      console.log('FINAL SUMMARY');
+      console.log(`${'='.repeat(50)}`);
+      for (const summary of downloadSummaries) {
+        const status = summary.isComplete ? '✅' : '⚠️';
+        console.log(`${status} ${summary.childName}: ${summary.scrapedTotal}/${summary.expectedTotal} photos scraped, ${summary.count} new downloaded`);
+      }
+      console.log(`\nTotal photos downloaded this run: ${totalDownloaded}`);
       console.log(`State saved to: ${CONFIG.stateFilePath}`);
+
+      if (hasValidationWarnings) {
+        console.log('\n⚠️  Some children have incomplete photo counts. Check logs above for details.');
+      }
 
       if (totalDownloaded > 0) {
         sendNotification(
@@ -580,13 +680,18 @@ async function main(): Promise<void> {
 
       // Download photos for each child
       let totalDownloaded = 0;
+      let hasValidationWarnings = false;
 
       for (const childKey of ['cole', 'isla'] as const) {
-        const downloaded = await downloadPhotosForChild(page, childKey, state);
-        totalDownloaded += downloaded;
+        const result = await downloadPhotosForChild(page, childKey, state);
+        totalDownloaded += result.downloaded;
+        if (!result.isComplete) hasValidationWarnings = true;
         downloadSummaries.push({
           childName: CONFIG.children[childKey].name,
-          count: downloaded,
+          count: result.downloaded,
+          expectedTotal: result.expectedTotal,
+          scrapedTotal: result.scrapedTotal,
+          isComplete: result.isComplete,
         });
       }
 
@@ -594,9 +699,20 @@ async function main(): Promise<void> {
       state.lastRun = new Date().toISOString();
       saveState(state);
 
-      console.log(`\n=== Complete ===`);
-      console.log(`Total photos downloaded: ${totalDownloaded}`);
+      // Print final summary
+      console.log(`\n${'='.repeat(50)}`);
+      console.log('FINAL SUMMARY');
+      console.log(`${'='.repeat(50)}`);
+      for (const summary of downloadSummaries) {
+        const status = summary.isComplete ? '✅' : '⚠️';
+        console.log(`${status} ${summary.childName}: ${summary.scrapedTotal}/${summary.expectedTotal} photos scraped, ${summary.count} new downloaded`);
+      }
+      console.log(`\nTotal photos downloaded this run: ${totalDownloaded}`);
       console.log(`State saved to: ${CONFIG.stateFilePath}`);
+
+      if (hasValidationWarnings) {
+        console.log('\n⚠️  Some children have incomplete photo counts. Check logs above for details.');
+      }
 
       if (totalDownloaded > 0) {
         sendNotification(
