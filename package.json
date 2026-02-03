@@ -1,0 +1,28 @@
+{
+  "name": "transparent-classroom-image-downloader",
+  "version": "1.0.0",
+  "description": "Automated daily photo downloader for Transparent Classroom",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "login": "node dist/index.js --login",
+    "dev": "ts-node src/index.ts"
+  },
+  "keywords": [],
+  "author": "Joe McCann",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.0",
+    "node-notifier": "^10.0.1",
+    "nodemailer": "^6.9.0",
+    "puppeteer": "^22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/node-notifier": "^8.0.5",
+    "@types/nodemailer": "^6.4.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
