@@ -207,33 +207,59 @@ async function scrapePhotosFromCurrentPage(page: Page): Promise<{ url: string; c
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   return await page.evaluate(() => {
-    const selectors = [
-      'img[src*="transparentclassroom.com"]',
-      'img[src*="s3.amazonaws.com"]',
-      'img[data-src*="transparentclassroom.com"]',
-      'img[data-src*="s3.amazonaws.com"]',
-      '.photo img',
-      '.post img',
-    ];
-
     const results: { url: string; caption: string | null }[] = [];
     const seen = new Set<string>();
 
-    for (const selector of selectors) {
-      const photoElements = document.querySelectorAll(selector);
-      photoElements.forEach((img) => {
-        const src = (img as HTMLImageElement).src || img.getAttribute('data-src') || '';
-        if (src && !seen.has(src) && src.includes('/posts/')) {
-          seen.add(src);
-          const parent = img.closest('.photo, .post, [class*="photo"]');
-          let caption: string | null = null;
-          if (parent) {
-            const captionEl = parent.querySelector('.caption, .description, p');
-            caption = captionEl?.textContent?.trim() || null;
-          }
-          results.push({ url: src, caption });
+    // Primary approach: get anchor tags with data-original attribute (full-size images)
+    const photoAnchors = document.querySelectorAll('.post.photo a.thumbnail[data-original], .post.photo a.fancybox[data-original]');
+
+    photoAnchors.forEach((anchor) => {
+      const a = anchor as HTMLAnchorElement;
+      // Prefer data-original (full size), fallback to href (large), fallback to img src (thumbnail)
+      const originalUrl = a.getAttribute('data-original') || a.href || '';
+
+      if (originalUrl && originalUrl.includes('/posts/') && !seen.has(originalUrl)) {
+        seen.add(originalUrl);
+
+        // Get caption from sibling hidden div
+        const parent = a.closest('.post.photo');
+        let caption: string | null = null;
+        if (parent) {
+          const captionEl = parent.querySelector('.PostBody__content div, .caption, .description');
+          caption = captionEl?.textContent?.trim() || null;
         }
-      });
+
+        results.push({ url: originalUrl, caption });
+      }
+    });
+
+    // Fallback: if no anchors found, try original img-based approach for backwards compatibility
+    if (results.length === 0) {
+      const selectors = [
+        'img[src*="transparentclassroom.com"]',
+        'img[src*="s3.amazonaws.com"]',
+        'img[data-src*="transparentclassroom.com"]',
+        'img[data-src*="s3.amazonaws.com"]',
+        '.photo img',
+        '.post img',
+      ];
+
+      for (const selector of selectors) {
+        const photoElements = document.querySelectorAll(selector);
+        photoElements.forEach((img) => {
+          const src = (img as HTMLImageElement).src || img.getAttribute('data-src') || '';
+          if (src && !seen.has(src) && src.includes('/posts/')) {
+            seen.add(src);
+            const parent = img.closest('.photo, .post, [class*="photo"]');
+            let caption: string | null = null;
+            if (parent) {
+              const captionEl = parent.querySelector('.caption, .description, p');
+              caption = captionEl?.textContent?.trim() || null;
+            }
+            results.push({ url: src, caption });
+          }
+        });
+      }
     }
 
     return results;
