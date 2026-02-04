@@ -91,7 +91,24 @@ Refactored image downloader to fetch full-size original images instead of thumbn
 - Fallback logic preserves backwards compatibility
 - Hash extraction regex works with `.original.jpeg` URLs
 
+### Test Results
+- **Cole**: 205 new photos downloaded (984 total in library)
+- **Isla**: 170 new photos downloaded (635 total in library)
+- **Total this run**: 375 full-size photos
+
+### File Size Comparison
+| Version | File Size | Example Files |
+|---------|-----------|---------------|
+| Old thumbnails | 11-14 KB | `2024_*.jpg` |
+| New originals | 2.5-2.9 MB | `2025_*.jpg` |
+
+**~200x increase** in file size confirms full-size originals are now being downloaded.
+
 ### TODOs
 - [x] Refactor to download full-size images
-- [ ] Test with `--login` flag to verify larger file downloads
-- [ ] Compare file sizes between old and new downloads
+- [x] Test with `--login` flag to verify larger file downloads
+- [x] Compare file sizes between old and new downloads
+
+### Commits
+- `0c269c7` - refactor: download full-size original images instead of thumbnails
+- `6865d3f` - chore: bump version to 1.0.1
