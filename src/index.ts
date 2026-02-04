@@ -425,7 +425,12 @@ async function downloadPhotosForChild(
         ? `${year}_${hashPrefix}_${caption}.jpg`
         : `${year}_${hashPrefix}.jpg`;
 
-      const destPath = path.join(child.outputDir, filename);
+      // Create year subdirectory for organization
+      const yearDir = path.join(child.outputDir, year);
+      if (!fs.existsSync(yearDir)) {
+        fs.mkdirSync(yearDir, { recursive: true });
+      }
+      const destPath = path.join(yearDir, filename);
 
       // Skip if file already exists (shouldn't happen but safety check)
       if (fs.existsSync(destPath)) {
