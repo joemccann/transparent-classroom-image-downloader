@@ -45,15 +45,14 @@ launchctl start com.joemccann.tc-downloader  # Trigger manually
 ```
 
 ### TODOs
-- [ ] **Improve scrolling**: Currently loads ~30 photos per page. Need to enhance infinite scroll handling to load all historical photos
+- [x] **Improve scrolling**: ~~Currently loads ~30 photos per page~~ → Fixed with pagination (b27af06)
 - [ ] **Session persistence**: Session occasionally expires between runs, requiring re-authentication
-- [ ] **Email notifications**: Gmail credentials in `.env` need to be configured with App Password
-- [ ] **Historical backfill**: Run multiple times or add pagination to download all ~995 photos for Cole
+- [x] **Email notifications**: Gmail App Password configured and working
+- [x] **Historical backfill**: ~~Run multiple times~~ → Pagination now downloads all photos automatically
 
 ### Known Issues
-1. Only 30 photos loaded per child on initial page load (lazy loading limitation)
+1. ~~Only 30 photos loaded per child on initial page load~~ → Fixed with pagination
 2. Session may expire, requiring `npm run login` to re-authenticate
-3. Email notification fails due to Gmail authentication (optional feature)
 
 ### Commits
 - `095d7ee` - fix: improve photo scraping with multiple selectors and debug output
@@ -112,3 +111,10 @@ Refactored image downloader to fetch full-size original images instead of thumbn
 ### Commits
 - `0c269c7` - refactor: download full-size original images instead of thumbnails
 - `6865d3f` - chore: bump version to 1.0.1
+- `5d6afd3` - docs: update progress with test results and file size comparison
+
+### Automation Status
+- ✅ launchd service installed at `~/Library/LaunchAgents/com.joemccann.tc-downloader.plist`
+- ✅ Service loaded and active
+- ✅ Scheduled to run daily at **8:00 AM**
+- Will send email notification if session expires
