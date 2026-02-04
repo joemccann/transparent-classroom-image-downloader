@@ -42,11 +42,18 @@ SMTP_PASS=your-app-password
 
 **Gmail App Password Setup:**
 
+Gmail requires an App Password (not your regular password) when 2FA is enabled:
+
 1. Go to [Google Account Security](https://myaccount.google.com/security)
-2. Enable 2-Factor Authentication if not already enabled
+2. Enable **2-Step Verification** if not already enabled
 3. Go to [App Passwords](https://myaccount.google.com/apppasswords)
-4. Generate a new app password for "Mail"
-5. Use the generated 16-character password as `SMTP_PASS`
+4. Click **Select app** → choose "Mail"
+5. Click **Select device** → choose "Other" and enter "TC Downloader"
+6. Click **Generate**
+7. Copy the 16-character password (looks like `abcd efgh ijkl mnop`)
+8. Paste it as `SMTP_PASS` in your `.env` file (without spaces)
+
+**Important:** App Passwords are 16 lowercase letters only - no numbers or special characters. If your password has `@`, `/`, or numbers, it's not an App Password.
 
 ### 3. Build
 
