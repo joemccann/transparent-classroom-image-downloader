@@ -118,3 +118,46 @@ Refactored image downloader to fetch full-size original images instead of thumbn
 - ✅ Service loaded and active
 - ✅ Scheduled to run daily at **8:00 AM**
 - Will send email notification if session expires
+
+---
+
+## Session: 2026-02-03 (Update 3)
+
+### Summary
+Added year-based folder organization for downloaded photos and cleaned up old thumbnails.
+
+### Changes Made
+
+#### Year Subdirectory Organization (`src/index.ts:428-432`)
+- Photos now save to year-based subdirectories: `Photos/Cole/2025/`, `Photos/Isla/2024/`, etc.
+- Year extracted from existing `photo.date` field (already used in filename prefix)
+- Creates directory automatically if it doesn't exist
+
+```typescript
+// New code
+const yearDir = path.join(child.outputDir, year);
+if (!fs.existsSync(yearDir)) {
+  fs.mkdirSync(yearDir, { recursive: true });
+}
+const destPath = path.join(yearDir, filename);
+```
+
+#### Existing Photo Migration
+- Organized 1,622 existing photos into year folders via bash script
+- Deleted 711 old thumbnail images (<50KB) from before full-size refactor
+- Removed empty year directories
+
+### Final Photo Library
+
+**Cole** (206 full-size photos)
+- 2025: 195 photos
+- 2026: 11 photos
+
+**Isla** (179 full-size photos)
+- 2024: 2 photos
+- 2025: 150 photos
+- 2026: 27 photos
+
+### Commits
+- `00288ef` - feat: organize downloaded photos into year subdirectories
+- `c475fe9` - chore: bump version to 1.0.2
