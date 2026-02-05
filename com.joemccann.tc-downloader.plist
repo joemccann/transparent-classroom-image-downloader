@@ -21,7 +21,7 @@
     <key>StandardErrorPath</key>
     <string>/Users/joemccann/dev/apps/home/transparent-classroom-image-downloader/logs/stderr.log</string>
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
     <key>WorkingDirectory</key>
     <string>/Users/joemccann/dev/apps/home/transparent-classroom-image-downloader</string>
     <key>EnvironmentVariables</key>
