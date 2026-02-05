@@ -1,6 +1,6 @@
 {
   "name": "transparent-classroom-image-downloader",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Automated daily photo downloader for Transparent Classroom",
   "main": "dist/index.js",
   "scripts": {
