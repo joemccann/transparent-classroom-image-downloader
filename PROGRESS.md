@@ -161,3 +161,53 @@ const destPath = path.join(yearDir, filename);
 ### Commits
 - `00288ef` - feat: organize downloaded photos into year subdirectories
 - `c475fe9` - chore: bump version to 1.0.2
+
+---
+
+## Session: 2026-02-04
+
+### Summary
+Implemented performance optimizations for faster photo scraping with early exit pagination and parallel child processing.
+
+### Changes Made
+
+#### 1. Early Exit Pagination (`src/index.ts:269-400`)
+- Modified `scrapePhotos()` to accept `downloadedHashes: Set<string>` parameter
+- Photos are ordered newest-first on TC, so once we hit a known photo, all subsequent are older
+- Added early exit logic: stop pagination when encountering an already-downloaded photo hash
+- **Before**: 50+ page fetches per child every run (even with 0 new photos)
+- **After**: 1-2 page fetches when no new photos (just page 1 to confirm)
+
+#### 2. Pass Downloaded Hashes to Scraper (`src/index.ts:429`)
+- Updated call to `scrapePhotos()` to pass the `downloadedSet`
+- Enables the early exit optimization
+
+#### 3. Parallel Child Processing (`src/index.ts:510-557`)
+- Added `processChildrenInParallel()` helper function
+- Creates separate browser pages (tabs) for Cole and Isla
+- Uses `Promise.all()` to process both children concurrently
+- Properly cleans up pages after completion
+- Reduced code duplication in `main()` by consolidating download logic
+- **Before**: Sequential processing (Cole ~30s + Isla ~30s = 60s)
+- **After**: Parallel processing (max(Cole, Isla) = ~30s)
+
+### Expected Performance Improvement
+| Scenario | Before | After |
+|----------|--------|-------|
+| No new photos | ~60s (all pages) | ~5s (page 1 only x2 parallel) |
+| 1-5 new photos | ~60s | ~10s (1-2 pages x2 parallel) |
+| Many new photos | ~60s | Similar but parallel |
+
+### Fresh Start Behavior
+When `downloadedHashes` is empty (first run):
+- Early exit condition never triggers
+- All pages are scraped (correct behavior for initial download)
+- All photos collected and downloaded
+
+### Build Status
+- TypeScript compilation: **SUCCESS**
+
+### TODOs
+- [ ] Run full end-to-end test to verify early exit works
+- [ ] Verify parallel processing shows interlaced logs
+- [ ] Test with fresh state file to confirm full scrape still works
