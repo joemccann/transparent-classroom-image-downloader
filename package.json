@@ -5,6 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "postinstall": "npm run browser:install",
+    "browser:install": "puppeteer browsers install chrome",
     "start": "node dist/index.js",
     "login": "node dist/index.js --login",
     "dev": "ts-node src/index.ts"

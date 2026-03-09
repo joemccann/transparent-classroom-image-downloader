@@ -12,6 +12,8 @@ state/
 
 # Puppeteer data
 puppeteer-data/
+.cache/
+logs/
 
 # OS files
 .DS_Store

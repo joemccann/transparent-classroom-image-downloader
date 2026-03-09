@@ -1,5 +1,36 @@
 # Progress - Transparent Classroom Image Downloader
 
+## Session: 2026-03-09
+
+### Completed
+
+- [x] **Scoped Puppeteer Browser Cache** — Browser resolution no longer depends on the global `~/.cache/puppeteer`
+  - Added `.puppeteerrc.cjs` with repo-local `cacheDirectory`
+  - Updated `src/index.ts` to set `PUPPETEER_CACHE_DIR` before Puppeteer loads
+  - Preserved `puppeteer-data/` for session state only
+
+- [x] **Local Browser Install Flow** — App now manages its own Chrome binary
+  - Added `postinstall` and `browser:install` scripts to `package.json`
+  - Updated `README.md` with install and repair instructions
+
+- [x] **Success Email Previews** — Successful sync emails now embed a bounded set of downloaded images
+  - Threaded downloaded image metadata through `src/index.ts`
+  - Added inline CID attachments in `src/email.ts`
+  - Limited previews to 4 images and 12 MB total to keep email size manageable
+
+- [x] **Verification** — Confirmed the scoped setup works
+  - `npm run build` passed
+  - `npm run browser:install` installed `chrome@127.0.6533.88` under `.cache/puppeteer`
+  - Headless Puppeteer launch succeeded after install
+
+### Notes
+
+- Root cause was Puppeteer defaulting to the global cache path for browser binaries
+- `userDataDir` controls profile/session data, not the Chrome binary location
+- Success emails now embed downloaded image previews from the current run rather than only reporting counts
+
+---
+
 ## Session: 2026-02-03/04
 
 ### Completed

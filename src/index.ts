@@ -1,10 +1,19 @@
 import 'dotenv/config';
-import puppeteer, { Browser, Page } from 'puppeteer';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
 import notifier from 'node-notifier';
 import { initializeEmail, sendSuccessEmail, sendAuthErrorEmail, sendErrorEmail } from './email';
+import type { DownloadSummary, DownloadedImage } from './email';
+import type { Browser, Page } from 'puppeteer';
+
+const projectRoot = path.resolve(__dirname, '..');
+const puppeteerCacheDir = path.join(projectRoot, '.cache', 'puppeteer');
+
+process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || puppeteerCacheDir;
+
+const puppeteerModule = require('puppeteer') as typeof import('puppeteer');
+const puppeteer = puppeteerModule.default ?? puppeteerModule;
 
 // Configuration
 const CONFIG = {
@@ -14,8 +23,9 @@ const CONFIG = {
     isla: { id: '598458', name: 'Isla', outputDir: '/Users/joemccann/Downloads/Photos/Isla' },
   },
   baseUrl: 'https://www.transparentclassroom.com',
-  stateFilePath: path.join(__dirname, '..', 'state', 'download-state.json'),
-  puppeteerDataDir: path.join(__dirname, '..', 'puppeteer-data'),
+  stateFilePath: path.join(projectRoot, 'state', 'download-state.json'),
+  puppeteerCacheDir,
+  puppeteerDataDir: path.join(projectRoot, 'puppeteer-data'),
 };
 
 interface ChildState {
@@ -405,6 +415,7 @@ interface DownloadResult {
   expectedTotal: number;
   scrapedTotal: number;
   isComplete: boolean;
+  images: DownloadedImage[];
 }
 
 async function downloadPhotosForChild(
@@ -440,10 +451,12 @@ async function downloadPhotosForChild(
       expectedTotal: scrapeResult.expectedTotal,
       scrapedTotal: scrapeResult.scrapedTotal,
       isComplete: scrapeResult.isComplete,
+      images: [],
     };
   }
 
   let downloadedCount = 0;
+  const downloadedImages: DownloadedImage[] = [];
 
   for (const photo of newPhotos) {
     try {
@@ -475,6 +488,12 @@ async function downloadPhotosForChild(
       // Update state
       childState.downloadedHashes.push(photo.hash);
       downloadedCount++;
+      downloadedImages.push({
+        childName: child.name,
+        filename,
+        filePath: destPath,
+        caption: photo.caption,
+      });
 
       // Small delay between downloads to be nice to the server
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -496,15 +515,8 @@ async function downloadPhotosForChild(
     expectedTotal: scrapeResult.expectedTotal,
     scrapedTotal: scrapeResult.scrapedTotal,
     isComplete: scrapeResult.isComplete,
+    images: downloadedImages,
   };
-}
-
-interface DownloadSummary {
-  childName: string;
-  count: number;
-  expectedTotal: number;
-  scrapedTotal: number;
-  isComplete: boolean;
 }
 
 // Process both children in parallel using separate browser pages
@@ -532,6 +544,7 @@ async function processChildrenInParallel(
       {
         childName: CONFIG.children.cole.name,
         count: coleResult.downloaded,
+        images: coleResult.images,
         expectedTotal: coleResult.expectedTotal,
         scrapedTotal: coleResult.scrapedTotal,
         isComplete: coleResult.isComplete,
@@ -539,6 +552,7 @@ async function processChildrenInParallel(
       {
         childName: CONFIG.children.isla.name,
         count: islaResult.downloaded,
+        images: islaResult.images,
         expectedTotal: islaResult.expectedTotal,
         scrapedTotal: islaResult.scrapedTotal,
         isComplete: islaResult.isComplete,
@@ -578,9 +592,13 @@ async function main(): Promise<void> {
     if (!fs.existsSync(CONFIG.puppeteerDataDir)) {
       fs.mkdirSync(CONFIG.puppeteerDataDir, { recursive: true });
     }
+    if (!fs.existsSync(CONFIG.puppeteerCacheDir)) {
+      fs.mkdirSync(CONFIG.puppeteerCacheDir, { recursive: true });
+    }
 
     // Launch browser with persistent profile
     console.log('\nLaunching browser...');
+    console.log(`Puppeteer cache directory: ${CONFIG.puppeteerCacheDir}`);
 
     // If force login, go directly to headful mode
     if (forceLogin) {

@@ -1,5 +1,40 @@
 # Progress
 
+## Session: 2026-03-09
+
+### Summary
+Scoped Puppeteer and Chrome installation to this app so browser startup no longer depends on the global `~/.cache/puppeteer` state.
+
+### Changes Made
+
+#### Scoped Browser Cache
+- Added `.puppeteerrc.cjs` to set Puppeteer's `cacheDirectory` to `.cache/puppeteer` inside this repo
+- Updated `src/index.ts` to initialize `PUPPETEER_CACHE_DIR` before loading Puppeteer at runtime
+- Kept `puppeteer-data/` for profile/session state and separated it from browser binary storage
+
+#### Install and Recovery Flow
+- Added `postinstall` and `browser:install` scripts in `package.json`
+- `npm install` now installs the app-local Chrome binary automatically
+- Added README instructions for repairing the local browser install with `npm run browser:install`
+
+#### Success Email Previews
+- Threaded downloaded image metadata from the sync run into the success email
+- Embedded inline previews for up to 4 new images using Nodemailer CID attachments
+- Added file-existence and total-size guards so preview embeds do not crash send or create oversized emails
+
+#### Repository Hygiene
+- Ignored `.cache/` and `logs/` runtime artifacts in `.gitignore`
+- Added `tasks/todo.md` with plan, dependency graph, and verification notes for the fix
+
+### Verification
+- `npm run build` succeeded
+- Puppeteer resolved `/Users/joemccann/dev/apps/home/transparent-classroom-image-downloader/.cache/puppeteer`
+- `npm run browser:install` installed `chrome@127.0.6533.88` into the repo-local cache
+- Headless smoke launch succeeded
+- Success email build now includes inline preview attachments sourced from downloaded local files
+
+---
+
 ## Session: 2026-02-03
 
 ### Summary

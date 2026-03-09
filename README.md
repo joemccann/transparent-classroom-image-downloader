@@ -9,6 +9,7 @@ Automated daily photo downloader for Transparent Classroom with email notificati
 - Desktop notifications via node-notifier
 - Email notifications for:
   - New photos downloaded
+  - Inline previews for up to 4 newly downloaded photos per run
   - Authentication errors (re-login required)
   - General errors
 
@@ -18,6 +19,14 @@ Automated daily photo downloader for Transparent Classroom with email notificati
 
 ```bash
 npm install
+```
+
+This app installs Chrome into a repo-local Puppeteer cache at `.cache/puppeteer`, so it does not depend on the global `~/.cache/puppeteer` state.
+
+If you need to repair or re-install the app-local browser manually, run:
+
+```bash
+npm run browser:install
 ```
 
 ### 2. Configure Email Notifications (Optional)
@@ -79,7 +88,7 @@ A browser window will open. Sign in to Transparent Classroom, then the browser w
 npm start
 ```
 
-Runs in headless mode using stored session. If the session expires, it will prompt for interactive login.
+Runs a manual sync/fetch in headless mode using the stored session and prints status in the terminal. If the session expires, it will prompt for interactive login.
 
 ### Development
 
@@ -98,7 +107,7 @@ Edit `src/index.ts` to configure:
 
 When configured, you'll receive emails for:
 
-- **Success**: Summary of photos downloaded per child
+- **Success**: Summary of photos downloaded per child plus inline previews for up to 4 new photos from the current run (bounded to keep email size manageable)
 - **Auth Error**: When re-authentication is required
 - **Error**: When download fails with error details
 

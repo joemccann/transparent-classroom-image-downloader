@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import nodemailer from 'nodemailer';
 import { Transporter } from 'nodemailer';
 
@@ -13,10 +14,26 @@ interface EmailConfig {
   };
 }
 
-interface DownloadSummary {
+export interface DownloadedImage {
+  childName: string;
+  filename: string;
+  filePath: string;
+  caption: string | null;
+}
+
+export interface DownloadSummary {
   childName: string;
   count: number;
+  expectedTotal: number;
+  scrapedTotal: number;
+  isComplete: boolean;
+  images: DownloadedImage[];
 }
+
+type AvailableDownloadedImage = DownloadedImage & { sizeBytes: number };
+
+const MAX_EMBEDDED_IMAGES = 4;
+const MAX_EMBEDDED_TOTAL_BYTES = 12 * 1024 * 1024;
 
 let transporter: Transporter | null = null;
 let emailConfig: EmailConfig | null = null;
@@ -78,7 +95,79 @@ export async function sendSuccessEmail(downloads: DownloadSummary[]): Promise<bo
     .map(d => `• ${d.childName}: ${d.count} photo${d.count === 1 ? '' : 's'}`)
     .join('\n');
 
+  const downloadedImages = downloads.flatMap(download => download.images);
+  const availableImages: AvailableDownloadedImage[] = downloadedImages.flatMap(image => {
+    try {
+      const stats = fs.statSync(image.filePath);
+      if (!stats.isFile()) {
+        console.warn(`Skipping non-file image attachment: ${image.filePath}`);
+        return [];
+      }
+
+      return [{ ...image, sizeBytes: stats.size }];
+    } catch {
+      console.warn(`Skipping missing image attachment: ${image.filePath}`);
+      return [];
+    }
+  });
+
+  let embeddedBytes = 0;
+  const selectedPreviewImages: AvailableDownloadedImage[] = [];
+  for (const image of availableImages) {
+    if (selectedPreviewImages.length >= MAX_EMBEDDED_IMAGES) {
+      break;
+    }
+    if (embeddedBytes + image.sizeBytes > MAX_EMBEDDED_TOTAL_BYTES) {
+      continue;
+    }
+
+    embeddedBytes += image.sizeBytes;
+    selectedPreviewImages.push(image);
+  }
+
+  const previewImages = selectedPreviewImages.map((image, index) => ({
+    ...image,
+    cid: `downloaded-photo-${index}@tc-downloader`,
+  }));
+  const omittedPreviewCount = Math.max(availableImages.length - previewImages.length, 0);
+  const missingPreviewCount = downloadedImages.length - availableImages.length;
+
   const subject = `📸 ${totalPhotos} new photo${totalPhotos === 1 ? '' : 's'} downloaded from Transparent Classroom`;
+  const previewHeading = previewImages.length > 0
+    ? `Showing ${previewImages.length} recent photo preview${previewImages.length === 1 ? '' : 's'}${omittedPreviewCount > 0 ? ` (${omittedPreviewCount} more not embedded to keep the email size manageable)` : ''}${missingPreviewCount > 0 ? ` (${missingPreviewCount} preview file${missingPreviewCount === 1 ? '' : 's'} unavailable)` : ''}.`
+    : 'New photos were downloaded, but preview images were skipped or unavailable.';
+
+  const previewHtml = previewImages.length > 0
+    ? `
+      <div style="margin: 24px 0;">
+        <h3 style="color: #2d3748; margin-bottom: 12px;">Preview</h3>
+        <p style="color: #4a5568; font-size: 14px; margin-top: 0;">${previewHeading}</p>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse: collapse;">
+          ${previewImages.map(image => `
+            <tr>
+              <td style="padding: 0 0 20px;">
+                <div style="border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; background: #ffffff;">
+                  <img
+                    src="cid:${image.cid}"
+                    alt="${escapeHtml(image.caption || image.filename)}"
+                    style="display: block; width: 100%; height: auto;"
+                  />
+                  <div style="padding: 12px 14px;">
+                    <div style="color: #2d3748; font-size: 13px; font-weight: 600; margin-bottom: 4px;">${escapeHtml(image.childName)}</div>
+                    <div style="color: #4a5568; font-size: 13px;">${escapeHtml(image.caption || image.filename)}</div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          `).join('')}
+        </table>
+      </div>
+    `
+    : `
+      <p style="color: #718096; font-size: 14px; margin-top: 16px;">
+        ${previewHeading}
+      </p>
+    `;
 
   const html = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -90,6 +179,7 @@ export async function sendSuccessEmail(downloads: DownloadSummary[]): Promise<bo
         <h3 style="color: #2d3748; margin-top: 0;">Summary</h3>
         <pre style="color: #4a5568; font-size: 14px; margin: 0;">${childSummaries}</pre>
       </div>
+      ${previewHtml}
       <p style="color: #718096; font-size: 14px;">
         Downloaded at: ${new Date().toLocaleString()}
       </p>
@@ -102,7 +192,23 @@ export async function sendSuccessEmail(downloads: DownloadSummary[]): Promise<bo
       to: emailConfig.to,
       subject,
       html,
-      text: `New Photos Downloaded\n\n${totalPhotos} new photo${totalPhotos === 1 ? ' has' : 's have'} been downloaded.\n\n${childSummaries}\n\nDownloaded at: ${new Date().toLocaleString()}`,
+      text: [
+        'New Photos Downloaded',
+        '',
+        `${totalPhotos} new photo${totalPhotos === 1 ? ' has' : 's have'} been downloaded.`,
+        '',
+        childSummaries,
+        '',
+        `Preview attachments included: ${previewImages.length}${omittedPreviewCount > 0 ? ` (${omittedPreviewCount} more image${omittedPreviewCount === 1 ? '' : 's'} omitted to keep email size manageable)` : ''}${missingPreviewCount > 0 ? ` (${missingPreviewCount} preview file${missingPreviewCount === 1 ? '' : 's'} unavailable)` : ''}`,
+        ...previewImages.map(image => `- ${image.childName}: ${image.caption || image.filename}`),
+        '',
+        `Downloaded at: ${new Date().toLocaleString()}`,
+      ].join('\n'),
+      attachments: previewImages.map(image => ({
+        filename: image.filename,
+        path: image.filePath,
+        cid: image.cid,
+      })),
     });
     console.log('Success email sent');
     return true;
@@ -110,6 +216,15 @@ export async function sendSuccessEmail(downloads: DownloadSummary[]): Promise<bo
     console.error('Failed to send success email:', error);
     return false;
   }
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export async function sendAuthErrorEmail(): Promise<boolean> {
