@@ -5,6 +5,7 @@ import * as https from 'https';
 import notifier from 'node-notifier';
 import { initializeEmail, sendSuccessEmail, sendAuthErrorEmail, sendErrorEmail } from './email';
 import type { DownloadSummary, DownloadedImage } from './email';
+import { navigateToPage } from './navigation';
 import type { Browser, Page } from 'puppeteer';
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -55,6 +56,23 @@ interface ScrapeResult {
   scrapedTotal: number;
   isComplete: boolean;
 }
+
+const LOGIN_ROUTE_MARKERS = ['/sign_in', '/login'];
+const LOGIN_READY_SELECTORS = [
+  'form[action*="sign_in"]',
+  'input[name="user[email]"]',
+  'input[type="password"]',
+];
+const PHOTO_PAGE_READY_SELECTORS = [
+  '.page_info',
+  '.post.photo',
+  '.post.photo a.thumbnail[data-original]',
+  '.post.photo a.fancybox[data-original]',
+  '.pagination',
+  '.pagination-container',
+  '.empty_state',
+  '.blank-state',
+];
 
 function loadState(): DownloadState {
   try {
@@ -140,15 +158,18 @@ async function downloadFile(url: string, destPath: string): Promise<void> {
 }
 
 async function checkAuthentication(page: Page): Promise<boolean> {
-  await page.goto(`${CONFIG.baseUrl}/souls/sign_in`, { waitUntil: 'networkidle2', timeout: 30000 });
-
-  // Wait a moment for any redirects
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await navigateToPage(page, `${CONFIG.baseUrl}/souls/sign_in`, {
+    navigationTimeoutMs: 30_000,
+    readyTimeoutMs: 30_000,
+    readySelectors: LOGIN_READY_SELECTORS,
+    readyUrlExcludes: LOGIN_ROUTE_MARKERS,
+    postReadyDelayMs: 500,
+  });
 
   const currentUrl = page.url();
 
   // If we're still on the sign_in page, we're not authenticated
-  if (currentUrl.includes('/sign_in')) {
+  if (LOGIN_ROUTE_MARKERS.some((marker) => currentUrl.includes(marker))) {
     return false;
   }
 
@@ -164,7 +185,12 @@ async function performInteractiveLogin(browser: Browser): Promise<boolean> {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
 
-  await page.goto(`${CONFIG.baseUrl}/souls/sign_in`, { waitUntil: 'networkidle2', timeout: 30000 });
+  await navigateToPage(page, `${CONFIG.baseUrl}/souls/sign_in`, {
+    navigationTimeoutMs: 30_000,
+    readyTimeoutMs: 30_000,
+    readySelectors: LOGIN_READY_SELECTORS,
+    readyUrlExcludes: LOGIN_ROUTE_MARKERS,
+  });
 
   // Wait for the user to complete login (check every 2 seconds)
   let attempts = 0;
@@ -174,7 +200,7 @@ async function performInteractiveLogin(browser: Browser): Promise<boolean> {
     await new Promise(resolve => setTimeout(resolve, 2000));
     const currentUrl = page.url();
 
-    if (!currentUrl.includes('/sign_in')) {
+    if (!LOGIN_ROUTE_MARKERS.some((marker) => currentUrl.includes(marker))) {
       console.log('Login successful!');
       await page.close();
       return true;
@@ -285,14 +311,17 @@ async function scrapePhotos(
   const basePhotosUrl = `${CONFIG.baseUrl}/s/${CONFIG.schoolId}/children/${childId}/photos?locale=en`;
 
   console.log(`\nNavigating to photos page for ${childName} (${childId})...`);
-  await page.goto(basePhotosUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-
-  // Wait for page to fully load
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await navigateToPage(page, basePhotosUrl, {
+    navigationTimeoutMs: 60_000,
+    readyTimeoutMs: 60_000,
+    readySelectors: PHOTO_PAGE_READY_SELECTORS,
+    readyUrlIncludes: LOGIN_ROUTE_MARKERS,
+    postReadyDelayMs: 1500,
+  });
 
   // Check if redirected to login
   const currentUrl = page.url();
-  if (currentUrl.includes('/sign_in') || currentUrl.includes('/login')) {
+  if (LOGIN_ROUTE_MARKERS.some((marker) => currentUrl.includes(marker))) {
     console.log('ERROR: Redirected to login page - session may have expired');
     return { photos: [], expectedTotal: 0, scrapedTotal: 0, isComplete: false };
   }
@@ -318,7 +347,13 @@ async function scrapePhotos(
       // Navigate to next page
       const pageUrl = `${basePhotosUrl}&page=${pageNum}`;
       console.log(`  Scraping page ${pageNum}/${maxPage}...`);
-      await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+      await navigateToPage(page, pageUrl, {
+        navigationTimeoutMs: 60_000,
+        readyTimeoutMs: 60_000,
+        readySelectors: PHOTO_PAGE_READY_SELECTORS,
+        readyUrlIncludes: LOGIN_ROUTE_MARKERS,
+        postReadyDelayMs: 1000,
+      });
     } else {
       console.log(`  Scraping page ${pageNum}/${maxPage}...`);
     }

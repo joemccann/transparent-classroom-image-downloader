@@ -88,13 +88,21 @@ A browser window will open. Sign in to Transparent Classroom, then the browser w
 npm start
 ```
 
-Runs a manual sync/fetch in headless mode using the stored session and prints status in the terminal. If the session expires, it will prompt for interactive login.
+Runs a manual sync/fetch in headless mode using the stored session and prints status in the terminal. Page navigation waits for concrete ready selectors instead of browser network-idle heuristics, which avoids hangs caused by Transparent Classroom background requests. If the session expires, it will prompt for interactive login.
 
 ### Development
 
 ```bash
 npm run dev
 ```
+
+### Testing
+
+```bash
+npm test
+```
+
+Builds `dist/` and runs the regression tests under `test/`. The current automated coverage asserts that the navigation helper uses `domcontentloaded` plus explicit readiness signals instead of brittle network-idle waits.
 
 ## Configuration
 
@@ -110,5 +118,7 @@ When configured, you'll receive emails for:
 - **Success**: Summary of photos downloaded per child plus inline previews for up to 4 new photos from the current run (bounded to keep email size manageable)
 - **Auth Error**: When re-authentication is required
 - **Error**: When download fails with error details
+
+If a run finds no new photos, the success email is skipped.
 
 Desktop notifications are always enabled as a fallback.

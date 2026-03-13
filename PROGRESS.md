@@ -1,5 +1,38 @@
 # Progress
 
+## Session: 2026-03-13
+
+### Summary
+Hardened navigation waits so scraping no longer depends on Puppeteer's `networkidle2` behavior, added a regression test for the readiness-based navigation path, and verified both a live smoke run and a production run against Transparent Classroom.
+
+### Changes Made
+
+#### Resilient Navigation
+- Added `src/navigation.ts` with a shared `navigateToPage()` helper
+- Replaced brittle `waitUntil: 'networkidle2'` page loads in auth and photo scraping flows with `domcontentloaded` plus explicit readiness selectors and URL markers
+- Reused the same readiness approach for initial photo navigation and paginated photo navigation
+
+#### Automated Verification
+- Added `npm test` to `package.json`
+- Added `test/navigation.test.js` to prove the navigation helper uses `domcontentloaded` plus explicit readiness signals instead of brittle network-idle waits
+
+#### Runtime Verification
+- Confirmed the saved Puppeteer profile still authenticated successfully in headless mode
+- Verified a live run with `EMAIL_ENABLED=false npm start` downloaded 4 new Isla photos on March 13, 2026
+- Ran a production `npm start` on March 13, 2026; it authenticated successfully, found no new photos for Cole or Isla, saved state, and skipped the success email because nothing new was downloaded
+
+### Verification
+- `npm test` succeeded
+- `EMAIL_ENABLED=false npm start` succeeded and downloaded 4 new Isla photos
+- `npm start` succeeded in production mode with `0` new downloads
+
+### Notes
+- This proves the current saved-session scraping flow works against the live site as of March 13, 2026
+- The interactive re-login flow was not re-tested in this session
+- Success email delivery still occurs only when a run downloads at least one new photo
+
+---
+
 ## Session: 2026-03-09
 
 ### Summary
