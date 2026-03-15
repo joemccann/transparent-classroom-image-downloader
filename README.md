@@ -2,11 +2,37 @@
 
 Download all your children's photos from [Transparent Classroom](https://www.transparentclassroom.com) to your local machine. Tracks previously downloaded photos to avoid duplicates, so you can run it repeatedly to grab only new ones.
 
-## Quick Start
+## Desktop App (Recommended)
+
+A native desktop app — no terminal, Node.js, or setup required.
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | [TC-Photo-Downloader.dmg (arm64)](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC-Photo-Downloader_0.1.0_aarch64.dmg) |
+| macOS (Intel) | [TC-Photo-Downloader.dmg (x64)](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC-Photo-Downloader_0.1.0_x64.dmg) |
+| Windows | [TC-Photo-Downloader.msi](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC-Photo-Downloader_0.1.0_x64-setup.msi) |
+
+> **Note**: On macOS you may need to right-click and select "Open" the first time, since the app is not notarized.
+
+### How the Desktop App Works
+
+1. Log in to Transparent Classroom through the in-app browser
+2. The app auto-detects your school and children
+3. Choose a download folder
+4. Hit "Start Download" — photos are organized by child and year
+5. Previously downloaded photos are skipped automatically
+
+---
+
+## CLI (Headless)
+
+For automation, scheduling, or running on a server without a GUI.
+
+### Quick Start
 
 ```bash
 git clone https://github.com/joemccann/transparent-classroom-image-downloader.git
-cd transparent-classroom-image-downloader
+cd transparent-classroom-image-downloader/cli
 npm install
 cp .env.example .env
 ```
@@ -21,7 +47,7 @@ npm start       # downloads all photos
 
 That's it. Photos are saved to `OUTPUT_DIR/<ChildName>/<year>/`.
 
-## Configuration
+### Configuration
 
 Copy `.env.example` to `.env` and fill in the required values:
 
@@ -51,68 +77,16 @@ OUTPUT_DIR=~/Downloads/Photos
 2. **School ID**: Look at the URL — e.g., `transparentclassroom.com/s/2521/...` → school ID is `2521`
 3. **Child ID**: Navigate to a child's profile — e.g., `.../children/322263/...` → child ID is `322263`
 
-## Usage
-
-### One-Time Download
+### Usage
 
 ```bash
 npm run login   # authenticate (opens browser)
 npm start       # download all photos
 ```
 
-### Subsequent Runs
+Just `npm start` for subsequent runs. The tool tracks what's been downloaded in `state/download-state.json` and only fetches new photos.
 
-Just `npm start`. The tool tracks what's been downloaded in `state/download-state.json` and only fetches new photos. If your session expired, it will prompt for login automatically.
-
-### Optional: Schedule Daily Runs (macOS)
-
-Create a LaunchAgent plist at `~/Library/LaunchAgents/com.yourname.tc-downloader.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.yourname.tc-downloader</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/path/to/node</string>
-        <string>/path/to/transparent-classroom-image-downloader/dist/index.js</string>
-    </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>8</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
-    <key>WorkingDirectory</key>
-    <string>/path/to/transparent-classroom-image-downloader</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/path/to/transparent-classroom-image-downloader/logs/stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/path/to/transparent-classroom-image-downloader/logs/stderr.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/path/to/node/bin</string>
-    </dict>
-</dict>
-</plist>
-```
-
-Then load it:
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.yourname.tc-downloader.plist
-```
-
-**Tip**: Run `which node` to find your Node.js path, and `pwd` in the repo to get the working directory.
-
-## Scripts
+### Scripts
 
 | Command | Description |
 |---------|-------------|
@@ -122,15 +96,15 @@ launchctl load ~/Library/LaunchAgents/com.yourname.tc-downloader.plist
 | `npm run dev` | Run via ts-node (no build needed) |
 | `npm test` | Build and run regression tests |
 
-## How It Works
+---
 
-1. Launches a headless Chromium browser with a persistent session
-2. Checks if you're authenticated; prompts for login if not
-3. For each configured child, navigates to their photos page
-4. Scrapes photo URLs across all pages (newest first, stops early when hitting already-downloaded photos)
-5. Downloads new photos into `OUTPUT_DIR/<ChildName>/<year>/`
-6. Saves state so the next run only grabs new photos
-7. Sends desktop/email notifications
+## Project Structure
+
+```
+├── cli/          # Headless Node.js scraper (for automation/scheduling)
+├── tauri-app/    # Native desktop app (Tauri 2 + React + Rust)
+└── .github/      # CI/CD workflows for building releases
+```
 
 ## License
 
