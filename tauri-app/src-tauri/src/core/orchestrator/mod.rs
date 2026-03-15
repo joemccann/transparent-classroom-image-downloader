@@ -6,12 +6,15 @@ use tracing::info;
 
 use crate::core::auth;
 use crate::core::download::{self, DownloadControls};
-use crate::core::errors::AppResult;
+use crate::core::errors::{AppError, AppResult};
 use crate::core::events::AppEvent;
 use crate::core::http::TcHttpClient;
 use crate::core::models::{AppSettings, DownloadItemStatus, DownloadJob, JobStatus, Photo};
 use crate::core::scrape;
 use crate::core::storage::Storage;
+
+/// Function type for fetching HTML via the WebView (which has session cookies).
+pub type PageFetcher = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
 /// The main orchestrator — coordinates auth → scrape → download pipeline.
 pub struct Orchestrator {
@@ -19,6 +22,7 @@ pub struct Orchestrator {
     client: TcHttpClient,
     controls: DownloadControls,
     event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    page_fetcher: Option<PageFetcher>,
 }
 
 impl Orchestrator {
@@ -26,15 +30,32 @@ impl Orchestrator {
         storage: Arc<Mutex<Storage>>,
         safe_mode: bool,
         event_sender: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+        controls: DownloadControls,
     ) -> AppResult<Self> {
         let client = TcHttpClient::new(safe_mode)?;
-        let controls = DownloadControls::new();
         Ok(Self {
             storage,
             client,
             controls,
             event_sender,
+            page_fetcher: None,
         })
+    }
+
+    /// Set the page fetcher that uses the WebView to fetch HTML.
+    pub fn set_page_fetcher(&mut self, fetcher: PageFetcher) {
+        self.page_fetcher = Some(fetcher);
+    }
+
+    /// Fetch HTML via WebView (preferred) or fall back to reqwest.
+    async fn fetch_html(&self, url: &str) -> AppResult<String> {
+        if let Some(ref fetcher) = self.page_fetcher {
+            fetcher(url.to_string())
+                .await
+                .map_err(|e| AppError::NetworkError(format!("WebView fetch failed: {}", e)))
+        } else {
+            self.client.get_html(url).await
+        }
     }
 
     /// Get download controls for pause/resume/cancel.
@@ -83,6 +104,14 @@ impl Orchestrator {
         }
 
         Ok(valid)
+    }
+
+    /// Store cookies in the HTTP client and keychain without validation.
+    /// Used when cookies come from document.cookie (no HttpOnly cookies).
+    pub fn load_cookies_only(&self, cookies: &str, school_id: &str) -> AppResult<()> {
+        self.client.load_cookies(cookies)?;
+        let _ = auth::create_session(cookies.to_string(), school_id.to_string());
+        Ok(())
     }
 
     /// Logout: clear session from keychain.
@@ -134,8 +163,23 @@ impl Orchestrator {
             let event_sender = self.event_sender.clone();
             let child_name_clone = child.name.clone();
 
+            // Create a fetch function that uses our WebView-based fetcher
+            let fetch_fn = |url: String| {
+                let fetcher = self.page_fetcher.clone();
+                let client = self.client.clone();
+                async move {
+                    if let Some(ref f) = fetcher {
+                        f(url.clone())
+                            .await
+                            .map_err(|e| AppError::NetworkError(format!("WebView fetch: {}", e)))
+                    } else {
+                        client.get_html(&url).await
+                    }
+                }
+            };
+
             let scan_result = scrape::scrape_child_photos(
-                &self.client,
+                &fetch_fn,
                 &settings.school_id,
                 &child.id,
                 &child.name,
@@ -151,7 +195,12 @@ impl Orchestrator {
             )
             .await?;
 
-            let new_count = scan_result.photos.len() as u32;
+            // DEV LIMIT: only take first 2 photos per child for testing
+            let mut child_photos = scan_result.photos;
+            if child_photos.len() > 2 {
+                child_photos.truncate(2);
+            }
+            let new_count = child_photos.len() as u32;
 
             self.emit(AppEvent::ScanCompleted {
                 child_name: child.name.clone(),
@@ -159,7 +208,7 @@ impl Orchestrator {
                 new_photos: new_count,
             });
 
-            for photo in scan_result.photos {
+            for photo in child_photos {
                 all_photos.push((photo, child.name.clone()));
             }
         }

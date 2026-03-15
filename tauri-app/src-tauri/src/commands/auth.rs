@@ -50,8 +50,9 @@ pub async fn open_auth_window(
     let login_url = "https://www.transparentclassroom.com/souls/sign_in";
     println!("[AUTH] open_auth_window: building window for {}", login_url);
 
-    // Simple script: update the window title with the current URL so it acts as a URL bar.
-    // Also detect when we leave the login page (auth complete).
+    // Minimal init script: just update the window title with the current URL.
+    // Cookie extraction and children scraping are handled by the Rust polling task
+    // via eval() calls, which gives us better timing control.
     let init_script = r#"
         (function() {
             function updateTitle() {
@@ -62,6 +63,21 @@ pub async fn open_auth_window(
         })();
     "#;
 
+    // Get screen dimensions for right-half positioning
+    let (half_w, full_h, half_x) = {
+        let main_win = app.get_webview_window("main");
+        match main_win.and_then(|w| w.current_monitor().ok().flatten()) {
+            Some(monitor) => {
+                let size = monitor.size();
+                let scale = monitor.scale_factor();
+                let sw = size.width as f64 / scale;
+                let sh = size.height as f64 / scale;
+                (sw / 2.0, sh, sw / 2.0)
+            }
+            None => (1024.0, 768.0, 0.0),
+        }
+    };
+
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         "auth-login",
@@ -70,8 +86,8 @@ pub async fn open_auth_window(
         ),
     )
     .title(login_url)
-    .inner_size(1024.0, 768.0)
-    .center()
+    .inner_size(half_w, full_h)
+    .position(half_x, 0.0)
     .resizable(true)
     .initialization_script(init_script)
     .build()
@@ -89,7 +105,8 @@ pub async fn open_auth_window(
     tauri::async_runtime::spawn(async move {
         let mut auth_completed = false;
         let mut school_id_emitted = false;
-        let mut detected_child_ids = std::collections::HashSet::<String>::new();
+        let mut cookies_sent = false;
+        let mut children_scrape_attempts = 0u32;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -126,8 +143,12 @@ pub async fn open_auth_window(
                 );
             }
 
+            if !auth_completed {
+                continue;
+            }
+
             // Extract school ID from /s/{id}/...
-            if auth_completed && !school_id_emitted {
+            if !school_id_emitted {
                 if let Some(start) = url_str.find("/s/") {
                     let rest = &url_str[start + 3..];
                     if let Some(end) = rest.find('/') {
@@ -146,22 +167,54 @@ pub async fn open_auth_window(
                 }
             }
 
-            // Extract child ID from /children/{id}
-            if auth_completed {
-                if let Some(start) = url_str.find("/children/") {
-                    let rest = &url_str[start + 10..];
-                    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-                    let cid = &rest[..end];
-                    if !cid.is_empty() && detected_child_ids.insert(cid.to_string()) {
-                        println!("[AUTH] poll: child_id = {}", cid);
-                        let _ = app_clone.emit(
-                            "tc-downloader-event",
-                            AppEvent::ChildPageDetected {
-                                child_id: cid.to_string(),
-                            },
-                        );
-                    }
-                }
+            // Send cookies to backend (just store them, skip validation)
+            if !cookies_sent {
+                println!("[AUTH] poll: extracting cookies via eval");
+                let _ = window_clone.eval(
+                    r#"
+                    (function() {
+                        if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
+                            window.__TAURI_INTERNALS__.invoke('complete_auth', {
+                                cookies: document.cookie
+                            });
+                        }
+                    })();
+                    "#,
+                );
+                cookies_sent = true;
+            }
+
+            // Scrape children from DOM via eval — retry up to 10 times
+            if children_scrape_attempts < 10 {
+                children_scrape_attempts += 1;
+                println!("[AUTH] poll: scraping children attempt {}", children_scrape_attempts);
+                let _ = window_clone.eval(
+                    r#"
+                    (function() {
+                        var links = document.querySelectorAll('a#child-nav');
+                        if (links.length === 0) return;
+
+                        var children = [];
+                        for (var i = 0; i < links.length; i++) {
+                            var a = links[i];
+                            var href = a.getAttribute('href') || '';
+                            var name = a.getAttribute('title') || '';
+                            var match = href.match(/\/children\/(\d+)/);
+                            if (match && name) {
+                                children.push({ id: match[1], name: name });
+                            }
+                        }
+
+                        if (children.length > 0 && window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
+                            window.__TAURI_INTERNALS__.invoke('notify_children_detected', {
+                                childrenJson: JSON.stringify(children)
+                            });
+                        }
+                    })();
+                    "#,
+                );
+                // We'll set children_scraped = true when the event comes back.
+                // For now, just keep trying on each poll cycle.
             }
         }
     });
@@ -169,8 +222,10 @@ pub async fn open_auth_window(
     Ok(())
 }
 
-/// Called after the user completes login in the WebView.
-/// Validates cookies and stores session.
+/// Called from the auth webview to store cookies.
+/// Stores cookies in the HTTP client and keychain without validation
+/// (document.cookie can't access HttpOnly session cookies, so validation
+/// would always fail). The URL polling task is the authoritative auth detector.
 #[tauri::command]
 pub async fn complete_auth(
     app: AppHandle,
@@ -189,14 +244,13 @@ pub async fn complete_auth(
         }
     };
 
+    // Load cookies into the HTTP client (even partial cookies help)
     let orchestrator = state.orchestrator.lock().await;
-    match orchestrator.as_ref() {
-        Some(o) => {
-            let result = o.complete_auth(cookies, &school_id).await?;
-            Ok(result)
-        }
-        None => Err(AppError::ConfigError("Orchestrator not initialized".into())),
+    if let Some(o) = orchestrator.as_ref() {
+        let _ = o.load_cookies_only(&cookies, &school_id);
     }
+
+    Ok(true)
 }
 
 /// Close the auth window.
@@ -216,6 +270,63 @@ pub async fn logout(app: AppHandle) -> Result<(), AppError> {
     let orchestrator = state.orchestrator.lock().await;
     if let Some(o) = orchestrator.as_ref() {
         o.logout()?;
+    }
+    Ok(())
+}
+
+/// Called from the auth webview init script when child-nav links are found in the DOM.
+#[tauri::command]
+pub fn notify_children_detected(
+    app: AppHandle,
+    children_json: String,
+) -> Result<(), String> {
+    println!("[AUTH] notify_children_detected: {}", children_json);
+
+    #[derive(serde::Deserialize)]
+    struct RawChild {
+        id: String,
+        name: String,
+    }
+
+    let raw: Vec<RawChild> = serde_json::from_str(&children_json)
+        .map_err(|e| format!("Failed to parse children JSON: {}", e))?;
+
+    let children: Vec<crate::core::events::DetectedChild> = raw
+        .into_iter()
+        .map(|c| crate::core::events::DetectedChild {
+            id: c.id,
+            name: c.name,
+        })
+        .collect();
+
+    if !children.is_empty() {
+        let _ = app.emit(
+            "tc-downloader-event",
+            AppEvent::ChildrenDetected { children },
+        );
+    }
+
+    Ok(())
+}
+
+/// Called from the WebView after fetch() completes, delivering HTML back to Rust.
+#[tauri::command]
+pub async fn deliver_page_html(
+    app: AppHandle,
+    request_id: String,
+    html: String,
+    error: Option<String>,
+) -> Result<(), String> {
+    println!("[AUTH] deliver_page_html: request_id={}, html_len={}, error={:?}",
+        request_id, html.len(), error);
+
+    let state = app.state::<AppState>();
+    let mut pending = state.pending_fetches.lock().await;
+    if let Some(sender) = pending.remove(&request_id) {
+        match error {
+            Some(e) => { let _ = sender.send(Err(e)); }
+            None => { let _ = sender.send(Ok(html)); }
+        }
     }
     Ok(())
 }

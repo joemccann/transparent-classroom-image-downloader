@@ -41,7 +41,7 @@ export function DestinationSetup() {
         updated.safe_mode
       );
       setSettings(updated);
-      setScreen("auth");
+      setScreen("download");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(`Failed to save settings: ${msg}`);

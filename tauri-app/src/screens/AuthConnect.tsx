@@ -26,8 +26,12 @@ export function AuthConnect() {
           break;
         case "auth_failed":
           console.log("[AUTH] auth_failed event:", data.message);
-          setAuthState("failed");
-          setError(data.message || "Authentication failed.");
+          // Only show failure if we haven't already succeeded
+          setAuthState((prev) => {
+            if (prev === "success") return prev;
+            setError(data.message || "Authentication failed.");
+            return "failed";
+          });
           break;
         case "school_detected":
           console.log("[AUTH] school_detected:", data.school_id);

@@ -2,6 +2,12 @@ use serde::Serialize;
 
 use crate::core::models::{FailureReason, JobStatus};
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectedChild {
+    pub id: String,
+    pub name: String,
+}
+
 /// All events emitted from backend to frontend.
 /// Each variant maps to a Tauri event name.
 #[derive(Debug, Clone, Serialize)]
@@ -18,6 +24,9 @@ pub enum AppEvent {
     },
     ChildPageDetected {
         child_id: String,
+    },
+    ChildrenDetected {
+        children: Vec<DetectedChild>,
     },
 
     // ── Session ──

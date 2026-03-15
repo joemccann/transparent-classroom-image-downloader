@@ -6,10 +6,19 @@ use scraper::{Html, Selector};
 use tracing::{debug, info};
 
 use crate::core::errors::{AppError, AppResult};
-use crate::core::http::TcHttpClient;
 use crate::core::models::Photo;
 
 pub use selectors::*;
+
+const BASE_URL: &str = "https://www.transparentclassroom.com";
+
+fn photos_url(school_id: &str, child_id: &str, page: u32) -> String {
+    if page <= 1 {
+        format!("{}/s/{}/children/{}/photos?locale=en", BASE_URL, school_id, child_id)
+    } else {
+        format!("{}/s/{}/children/{}/photos?locale=en&page={}", BASE_URL, school_id, child_id, page)
+    }
+}
 
 /// Page metadata extracted from the photos listing page.
 #[derive(Debug)]
@@ -173,19 +182,25 @@ pub struct ScrapeResult {
 
 /// Scrape all photos for a child, with early-exit when hitting known hashes.
 /// Returns only new photos not in `known_hashes`.
-pub async fn scrape_child_photos(
-    client: &TcHttpClient,
+/// `fetch_html` is used to get page HTML — it may use the WebView (with session
+/// cookies) or reqwest.
+pub async fn scrape_child_photos<F, Fut>(
+    fetch_html: &F,
     school_id: &str,
     child_id: &str,
     child_name: &str,
     known_hashes: &HashSet<String>,
     on_progress: impl Fn(u32, u32, u32), // (page, total_pages, photos_found_so_far)
-) -> AppResult<ScrapeResult> {
+) -> AppResult<ScrapeResult>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
     info!("Scraping photos for {} ({})", child_name, child_id);
 
     // Fetch first page
-    let first_url = client.photos_url(school_id, child_id, 1);
-    let first_html_text = client.get_html(&first_url).await?;
+    let first_url = photos_url(school_id, child_id, 1);
+    let first_html_text = fetch_html(first_url).await?;
 
     // Check if we got redirected to login
     if first_html_text.contains("sign_in") && first_html_text.contains("input[type=\"password\"]")
@@ -233,10 +248,10 @@ pub async fn scrape_child_photos(
     // Scrape remaining pages
     if !early_exit {
         for page_num in 2..=metadata.max_page {
-            let page_url = client.photos_url(school_id, child_id, page_num);
+            let page_url = photos_url(school_id, child_id, page_num);
             debug!("  Scraping page {}/{}", page_num, metadata.max_page);
 
-            let page_html_text = client.get_html(&page_url).await?;
+            let page_html_text = fetch_html(page_url).await?;
 
             // Parse in sync block (scraper::Html is !Send)
             let page_photos = {
@@ -350,5 +365,189 @@ mod tests {
         );
         assert_eq!(photos[0].year.as_deref(), Some("2026"));
         assert_eq!(photos[0].child_id, "12345");
+    }
+
+    /// Helper: build a fake photos page with the given photo entries and page metadata.
+    fn build_fake_photos_page(
+        photos: &[(&str, &str)], // (hash, year)
+        total_photos: u32,
+        current_page: u32,
+        max_page: u32,
+    ) -> String {
+        let mut html = String::from(r#"<html><body>"#);
+
+        // Page info
+        html.push_str(&format!(
+            r#"<span class="page_info">{} Photos</span>"#,
+            total_photos
+        ));
+
+        // Pagination links (wrapped in .pagination container per selector)
+        html.push_str(r#"<div class="pagination">"#);
+        for p in 1..=max_page {
+            if p == current_page {
+                html.push_str(&format!(r#"<span class="current">{}</span>"#, p));
+            } else {
+                html.push_str(&format!(
+                    r#"<a href="?page={}">{}</a>"#,
+                    p, p
+                ));
+            }
+        }
+        html.push_str("</div>");
+
+        // Photo entries
+        for (hash, year) in photos {
+            html.push_str(&format!(
+                r#"<div class="post photo">
+                    <a class="thumbnail" data-original="https://s3.amazonaws.com/transparentclassroom.com/schools/2521/{}/posts/{}.large.jpeg" href="/photo/1">
+                        <img src="thumb.jpg"/>
+                    </a>
+                </div>"#,
+                year, hash
+            ));
+        }
+
+        html.push_str("</body></html>");
+        html
+    }
+
+    #[tokio::test]
+    async fn test_scrape_with_custom_fetcher_finds_photos() {
+        // Simulate a fetcher that returns a page with 2 photos
+        let hash1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let hash2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let page_html = build_fake_photos_page(
+            &[(hash1, "2026"), (hash2, "2026")],
+            2,
+            1,
+            1,
+        );
+
+        let fetch_fn = |_url: String| {
+            let html = page_html.clone();
+            async move { Ok(html) as AppResult<String> }
+        };
+
+        let known_hashes = HashSet::new();
+        let result = scrape_child_photos(
+            &fetch_fn,
+            "2521",
+            "99999",
+            "Test Child",
+            &known_hashes,
+            |_page, _total, _found| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.photos.len(), 2);
+        assert_eq!(result.photos[0].hash, hash1);
+        assert_eq!(result.photos[1].hash, hash2);
+        assert_eq!(result.total_expected, 2);
+    }
+
+    #[tokio::test]
+    async fn test_scrape_skips_known_hashes() {
+        let hash1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let hash2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let page_html = build_fake_photos_page(
+            &[(hash1, "2026"), (hash2, "2026")],
+            2,
+            1,
+            1,
+        );
+
+        let fetch_fn = |_url: String| {
+            let html = page_html.clone();
+            async move { Ok(html) as AppResult<String> }
+        };
+
+        // Mark hash1 as known — should trigger early exit
+        let mut known_hashes = HashSet::new();
+        known_hashes.insert(hash1.to_string());
+
+        let result = scrape_child_photos(
+            &fetch_fn,
+            "2521",
+            "99999",
+            "Test Child",
+            &known_hashes,
+            |_page, _total, _found| {},
+        )
+        .await
+        .unwrap();
+
+        // Early exit on first known hash, so 0 new photos
+        assert_eq!(result.photos.len(), 0);
+        assert!(result.early_exit);
+    }
+
+    #[tokio::test]
+    async fn test_scrape_detects_login_redirect() {
+        let login_html = r#"<html><body>
+            <form action="/souls/sign_in">
+                <input[type="password"]/>
+            </form>
+        </body></html>"#;
+
+        let fetch_fn = |_url: String| {
+            let html = login_html.to_string();
+            async move { Ok(html) as AppResult<String> }
+        };
+
+        let result = scrape_child_photos(
+            &fetch_fn,
+            "2521",
+            "99999",
+            "Test Child",
+            &HashSet::new(),
+            |_page, _total, _found| {},
+        )
+        .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AppError::SessionExpired => {} // expected
+            other => panic!("Expected SessionExpired, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scrape_multi_page_pagination() {
+        let hash1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let hash2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let page1_html = build_fake_photos_page(&[(hash1, "2026")], 2, 1, 2);
+        let page2_html = build_fake_photos_page(&[(hash2, "2025")], 2, 2, 2);
+
+        let fetch_fn = |url: String| {
+            let p1 = page1_html.clone();
+            let p2 = page2_html.clone();
+            async move {
+                if url.contains("page=2") {
+                    Ok(p2) as AppResult<String>
+                } else {
+                    Ok(p1) as AppResult<String>
+                }
+            }
+        };
+
+        let result = scrape_child_photos(
+            &fetch_fn,
+            "2521",
+            "99999",
+            "Test Child",
+            &HashSet::new(),
+            |_page, _total, _found| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.photos.len(), 2);
+        assert_eq!(result.photos[0].hash, hash1);
+        assert_eq!(result.photos[1].hash, hash2);
+        assert_eq!(result.photos[0].year.as_deref(), Some("2026"));
+        assert_eq!(result.photos[1].year.as_deref(), Some("2025"));
     }
 }

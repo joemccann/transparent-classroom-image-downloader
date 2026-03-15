@@ -10,47 +10,62 @@ export function ChildrenSetup() {
   const [children, setChildren] = useState<ChildConfig[]>(
     settings?.children?.length ? settings.children : []
   );
-  const [pendingChildId, setPendingChildId] = useState<string | null>(null);
-  const [nameInput, setNameInput] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  // Listen for child page detection events
+  // Listen for auto-detected children from DOM scraping
   useEffect(() => {
     const unlistenPromise = listen("tc-downloader-event", (event: any) => {
       const data = event.payload;
+
+      // Batch children detected from nav DOM parsing
+      if (data?.type === "children_detected" && Array.isArray(data.children)) {
+        console.log("[CHILDREN] children_detected:", data.children);
+        setChildren((prev) => {
+          const existingIds = new Set(prev.map((c) => c.id));
+          const newChildren = data.children
+            .filter((c: any) => c.id && c.name && !existingIds.has(c.id))
+            .map((c: any) => ({ id: c.id, name: c.name }));
+          if (newChildren.length === 0) return prev;
+          return [...prev, ...newChildren];
+        });
+      }
+
+      // Single child detected from URL navigation (fallback)
       if (data?.type === "child_page_detected") {
-        // Only set pending if not already added
-        const alreadyAdded = children.some((c) => c.id === data.child_id);
-        if (!alreadyAdded) {
-          setPendingChildId(data.child_id);
-          setNameInput("");
-        }
+        setChildren((prev) => {
+          if (prev.some((c) => c.id === data.child_id)) return prev;
+          return [...prev, { id: data.child_id, name: "" }];
+        });
       }
     });
     return () => { unlistenPromise.then((fn) => fn()); };
-  }, [children]);
+  }, []);
 
-  const addChild = useCallback(() => {
-    if (!pendingChildId || !nameInput.trim()) return;
-    setChildren((prev) => [...prev, { id: pendingChildId, name: nameInput.trim() }]);
-    setPendingChildId(null);
-    setNameInput("");
-  }, [pendingChildId, nameInput]);
+  const updateChildName = useCallback((index: number, name: string) => {
+    setChildren((prev) =>
+      prev.map((c, i) => (i === index ? { ...c, name } : c))
+    );
+  }, []);
 
   const removeChild = (index: number) => {
     setChildren((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleNext = async () => {
+    // Validate all children have names
+    const unnamed = children.find((c) => !c.name.trim());
+    if (unnamed) {
+      setError("Please enter a name for all children.");
+      return;
+    }
     if (children.length === 0) {
       setError("Add at least one child before continuing.");
       return;
     }
 
-    // Save settings and close auth window
     setSettings({
       school_id: schoolId || "2521",
-      children,
+      children: children.map((c) => ({ ...c, name: c.name.trim() })),
       output_dir: settings?.output_dir ?? "",
       concurrency: settings?.concurrency ?? 3,
       safe_mode: settings?.safe_mode ?? false,
@@ -75,27 +90,33 @@ export function ChildrenSetup() {
     >
       <div className="mb-8">
         <h1 className="text-2xl font-bold tracking-tighter text-zinc-50">
-          Add Children
+          Your Children
         </h1>
         <p className="mt-1 text-sm text-zinc-400">
-          Click on each child in the Transparent Classroom window.
+          We detected your children from Transparent Classroom.
           <br />
           <span className="text-zinc-500">
-            We'll detect their ID automatically — just enter their name.
+            Edit names if needed, then continue.
           </span>
         </p>
       </div>
 
-      <div className="flex-1 space-y-4">
-        {/* Added children */}
+      <div className="flex-1 space-y-3">
+        {/* Children list — editable names */}
         {children.map((child, i) => (
           <div
             key={child.id}
-            className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3"
+            className="flex items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3"
           >
-            <div>
-              <p className="text-sm font-medium text-zinc-200">{child.name}</p>
-              <p className="text-xs text-zinc-500">ID: {child.id}</p>
+            <div className="flex-1">
+              <input
+                type="text"
+                className="input-inset w-full"
+                placeholder="Child's name"
+                value={child.name}
+                onChange={(e) => updateChildName(i, e.target.value)}
+              />
+              <p className="mt-1 text-xs text-zinc-500">ID: {child.id}</p>
             </div>
             <button
               onClick={() => removeChild(i)}
@@ -106,55 +127,17 @@ export function ChildrenSetup() {
           </div>
         ))}
 
-        {/* Pending child — name input */}
-        {pendingChildId && (
-          <div className="rounded-lg border border-indigo-900 bg-indigo-950/30 px-4 py-3">
-            <p className="mb-2 text-xs font-medium text-indigo-400">
-              Child detected — ID: {pendingChildId}
-            </p>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                className="input-inset flex-1"
-                placeholder="Enter child's name"
-                value={nameInput}
-                onChange={(e) => setNameInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && addChild()}
-                autoFocus
-              />
-              <button
-                onClick={addChild}
-                disabled={!nameInput.trim()}
-                className="btn-accent"
-              >
-                Add
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Empty state — no children added yet */}
-        {children.length === 0 && !pendingChildId && (
+        {/* Empty state — waiting for detection */}
+        {children.length === 0 && (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900">
-              <svg className="h-7 w-7 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
-              </svg>
+              <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-500 border-t-transparent" />
             </div>
             <p className="text-sm text-zinc-400">
-              Navigate to a child's page in the TC window.
+              Detecting children from Transparent Classroom...
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              Click on a child's name in the sidebar to detect their ID.
-            </p>
-          </div>
-        )}
-
-        {/* Add another child prompt — shown after at least one child is added */}
-        {children.length > 0 && !pendingChildId && (
-          <div className="flex flex-col items-center rounded-lg border border-dashed border-zinc-700 bg-zinc-900/30 py-6 text-center">
-            <p className="text-sm text-zinc-400">
-              Click another child in the TC window to add them, or continue.
+              This happens automatically after login.
             </p>
           </div>
         )}

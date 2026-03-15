@@ -3,6 +3,7 @@ mod core;
 mod platform;
 mod state;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tauri::{Emitter, Manager};
@@ -10,11 +11,26 @@ use tokio::sync::Mutex;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use crate::core::download::DownloadControls;
 use crate::core::events::AppEvent;
 use crate::core::orchestrator::Orchestrator;
 use crate::core::storage::Storage;
 use crate::platform::paths;
 use crate::state::AppState;
+
+/// Position the main window at top-left, taking 50% of screen width.
+fn position_main_window(app: &tauri::App) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            let half_w = (size.width as f64 / scale / 2.0) as u32;
+            let h = (size.height as f64 / scale) as u32;
+            let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(0.0, 0.0)));
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(half_w as f64, h as f64)));
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -71,18 +87,31 @@ pub fn run() {
                 }
             });
 
+            // Shared download controls (accessible without orchestrator lock)
+            let controls = DownloadControls::new();
+
             // Initialize orchestrator
             let safe_mode = false; // configurable later
-            let orchestrator = Orchestrator::new(storage.clone(), safe_mode, event_tx)
-                .expect("Failed to create orchestrator");
+            let orchestrator = Orchestrator::new(
+                storage.clone(),
+                safe_mode,
+                event_tx,
+                controls.clone(),
+            )
+            .expect("Failed to create orchestrator");
 
             let state = AppState {
                 storage,
                 settings,
                 orchestrator: Arc::new(Mutex::new(Some(orchestrator))),
+                pending_fetches: Arc::new(Mutex::new(HashMap::new())),
+                download_controls: controls,
             };
 
             app.manage(state);
+
+            // Position main window at top-left, 50% width
+            position_main_window(app);
 
             Ok(())
         })
@@ -96,6 +125,8 @@ pub fn run() {
             commands::auth::logout,
             commands::auth::get_login_url,
             commands::auth::close_auth_window,
+            commands::auth::notify_children_detected,
+            commands::auth::deliver_page_html,
             commands::jobs::start_download,
             commands::jobs::pause_download,
             commands::jobs::resume_download,
