@@ -3,12 +3,13 @@ node_modules/
 
 # Build output
 dist/
+target/
 
 # Environment variables
 .env
 
-# State files
-state/
+# State files (CLI headless app)
+/cli/state/
 
 # Puppeteer data
 puppeteer-data/
@@ -27,3 +28,8 @@ _private/
 
 # LaunchAgent plist files (contain user-specific paths)
 *.plist
+
+# Tauri
+tauri-app/src-tauri/target/
+tauri-app/node_modules/
+tauri-app/dist/
