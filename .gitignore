@@ -24,3 +24,6 @@ logs/
 
 # Private
 _private/
+
+# LaunchAgent plist files (contain user-specific paths)
+*.plist

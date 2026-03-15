@@ -16,13 +16,62 @@ process.env.PUPPETEER_CACHE_DIR = process.env.PUPPETEER_CACHE_DIR || puppeteerCa
 const puppeteerModule = require('puppeteer') as typeof import('puppeteer');
 const puppeteer = puppeteerModule.default ?? puppeteerModule;
 
-// Configuration
+// Configuration — read from environment variables
+interface ChildConfig {
+  key: string;
+  id: string;
+  name: string;
+  outputDir: string;
+}
+
+function parseChildren(): ChildConfig[] {
+  const childrenEnv = process.env.CHILDREN;
+  const outputDir = process.env.OUTPUT_DIR;
+
+  if (!childrenEnv) {
+    console.error('ERROR: CHILDREN environment variable is required.');
+    console.error('Format: CHILDREN="ChildName:ChildID,ChildName2:ChildID2"');
+    process.exit(1);
+  }
+  if (!outputDir) {
+    console.error('ERROR: OUTPUT_DIR environment variable is required.');
+    console.error('Example: OUTPUT_DIR=~/Downloads/Photos');
+    process.exit(1);
+  }
+
+  const resolvedOutputDir = outputDir.replace(/^~/, process.env.HOME || '');
+
+  return childrenEnv.split(',').map((entry) => {
+    const [name, id] = entry.trim().split(':');
+    if (!name || !id) {
+      console.error(`ERROR: Invalid CHILDREN entry "${entry}". Expected "Name:ID".`);
+      process.exit(1);
+    }
+    const key = name.toLowerCase();
+    return {
+      key,
+      id: id.trim(),
+      name: name.trim(),
+      outputDir: path.join(resolvedOutputDir, name.trim()),
+    };
+  });
+}
+
+function getSchoolId(): string {
+  const schoolId = process.env.SCHOOL_ID;
+  if (!schoolId) {
+    console.error('ERROR: SCHOOL_ID environment variable is required.');
+    process.exit(1);
+  }
+  return schoolId;
+}
+
+const children = parseChildren();
+const schoolId = getSchoolId();
+
 const CONFIG = {
-  schoolId: '2521',
-  children: {
-    cole: { id: '322263', name: 'Cole', outputDir: '/Users/joemccann/Downloads/Photos/Cole' },
-    isla: { id: '598458', name: 'Isla', outputDir: '/Users/joemccann/Downloads/Photos/Isla' },
-  },
+  schoolId,
+  children,
   baseUrl: 'https://www.transparentclassroom.com',
   stateFilePath: path.join(projectRoot, 'state', 'download-state.json'),
   puppeteerCacheDir,
@@ -37,10 +86,7 @@ interface ChildState {
 
 interface DownloadState {
   lastRun: string | null;
-  children: {
-    cole: ChildState;
-    isla: ChildState;
-  };
+  children: Record<string, ChildState>;
 }
 
 interface PhotoInfo {
@@ -75,18 +121,22 @@ const PHOTO_PAGE_READY_SELECTORS = [
 ];
 
 function loadState(): DownloadState {
+  let state: DownloadState;
   try {
     const data = fs.readFileSync(CONFIG.stateFilePath, 'utf-8');
-    return JSON.parse(data);
+    state = JSON.parse(data);
   } catch {
-    return {
-      lastRun: null,
-      children: {
-        cole: { childId: CONFIG.children.cole.id, downloadedHashes: [], lastDownloadedAt: null },
-        isla: { childId: CONFIG.children.isla.id, downloadedHashes: [], lastDownloadedAt: null },
-      },
-    };
+    state = { lastRun: null, children: {} };
   }
+
+  // Ensure every configured child has a state entry
+  for (const child of CONFIG.children) {
+    if (!state.children[child.key]) {
+      state.children[child.key] = { childId: child.id, downloadedHashes: [], lastDownloadedAt: null };
+    }
+  }
+
+  return state;
 }
 
 function saveState(state: DownloadState): void {
@@ -455,11 +505,10 @@ interface DownloadResult {
 
 async function downloadPhotosForChild(
   page: Page,
-  childKey: 'cole' | 'isla',
+  child: ChildConfig,
   state: DownloadState
 ): Promise<DownloadResult> {
-  const child = CONFIG.children[childKey];
-  const childState = state.children[childKey];
+  const childState = state.children[child.key];
   const downloadedSet = new Set(childState.downloadedHashes);
 
   console.log(`\n${'='.repeat(50)}`);
@@ -554,54 +603,45 @@ async function downloadPhotosForChild(
   };
 }
 
-// Process both children in parallel using separate browser pages
+// Process all children in parallel using separate browser pages
 async function processChildrenInParallel(
   browser: Browser,
   state: DownloadState
 ): Promise<{ summaries: DownloadSummary[]; totalDownloaded: number; hasWarnings: boolean }> {
-  console.log('\n🚀 Processing children in parallel...');
+  console.log(`\nProcessing ${CONFIG.children.length} child${CONFIG.children.length === 1 ? '' : 'ren'} in parallel...`);
 
   // Create separate pages for each child
-  const colePage = await browser.newPage();
-  const islaPage = await browser.newPage();
-  await colePage.setViewport({ width: 1920, height: 1080 });
-  await islaPage.setViewport({ width: 1920, height: 1080 });
+  const pages: Page[] = [];
+  for (let i = 0; i < CONFIG.children.length; i++) {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    pages.push(page);
+  }
 
   try {
-    // Process both children concurrently
-    const [coleResult, islaResult] = await Promise.all([
-      downloadPhotosForChild(colePage, 'cole', state),
-      downloadPhotosForChild(islaPage, 'isla', state),
-    ]);
+    // Process all children concurrently
+    const results = await Promise.all(
+      CONFIG.children.map((child, i) => downloadPhotosForChild(pages[i], child, state))
+    );
 
     // Aggregate results
-    const summaries: DownloadSummary[] = [
-      {
-        childName: CONFIG.children.cole.name,
-        count: coleResult.downloaded,
-        images: coleResult.images,
-        expectedTotal: coleResult.expectedTotal,
-        scrapedTotal: coleResult.scrapedTotal,
-        isComplete: coleResult.isComplete,
-      },
-      {
-        childName: CONFIG.children.isla.name,
-        count: islaResult.downloaded,
-        images: islaResult.images,
-        expectedTotal: islaResult.expectedTotal,
-        scrapedTotal: islaResult.scrapedTotal,
-        isComplete: islaResult.isComplete,
-      },
-    ];
+    const summaries: DownloadSummary[] = results.map((result, i) => ({
+      childName: CONFIG.children[i].name,
+      count: result.downloaded,
+      images: result.images,
+      expectedTotal: result.expectedTotal,
+      scrapedTotal: result.scrapedTotal,
+      isComplete: result.isComplete,
+    }));
 
-    const totalDownloaded = coleResult.downloaded + islaResult.downloaded;
-    const hasWarnings = !coleResult.isComplete || !islaResult.isComplete;
+    const totalDownloaded = results.reduce((sum, r) => sum + r.downloaded, 0);
+    const hasWarnings = results.some((r) => !r.isComplete);
 
     return { summaries, totalDownloaded, hasWarnings };
   } finally {
-    // Clean up pages
-    await colePage.close();
-    await islaPage.close();
+    for (const page of pages) {
+      await page.close();
+    }
   }
 }
 
