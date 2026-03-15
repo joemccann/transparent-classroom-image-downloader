@@ -13,6 +13,9 @@ pub async fn save_settings(
     concurrency: Option<u8>,
     safe_mode: Option<bool>,
 ) -> Result<(), AppError> {
+    println!("[SETTINGS] save_settings called: school={}, children={}, dir={}",
+        school_id, children.len(), output_dir);
+
     let settings = AppSettings {
         school_id,
         children,
@@ -21,13 +24,16 @@ pub async fn save_settings(
         safe_mode: safe_mode.unwrap_or(false),
     };
 
+    println!("[SETTINGS] acquiring storage lock...");
     let storage = state.storage.lock().await;
+    println!("[SETTINGS] storage lock acquired, saving...");
     storage.save_settings(&settings)?;
     drop(storage);
+    println!("[SETTINGS] saved to DB, acquiring settings lock...");
 
-    // Update cached settings
     let mut cached = state.settings.lock().await;
     *cached = Some(settings);
+    println!("[SETTINGS] settings cached, done");
 
     Ok(())
 }
@@ -56,16 +62,13 @@ pub async fn load_settings(state: State<'_, AppState>) -> Result<Option<AppSetti
 pub async fn get_download_stats(
     state: State<'_, AppState>,
 ) -> Result<Vec<(String, u32)>, AppError> {
-    let settings = state.settings.lock().await;
-    let settings = match settings.as_ref() {
-        Some(s) => s.clone(),
-        None => return Ok(Vec::new()),
+    let children = {
+        let settings = state.settings.lock().await;
+        match settings.as_ref() {
+            Some(s) => s.children.clone(),
+            None => return Ok(Vec::new()),
+        }
     };
-    drop(settings);
-
-    let cached_settings = state.settings.lock().await;
-    let children = cached_settings.as_ref().map(|s| s.children.clone()).unwrap_or_default();
-    drop(cached_settings);
 
     let storage = state.storage.lock().await;
     let mut stats = Vec::new();
