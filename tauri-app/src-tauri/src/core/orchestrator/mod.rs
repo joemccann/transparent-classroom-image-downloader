@@ -195,10 +195,10 @@ impl Orchestrator {
             )
             .await?;
 
-            // DEV LIMIT: only take first 2 photos per child for testing
+            // DEV LIMIT: only take first 50 photos per child for testing
             let mut child_photos = scan_result.photos;
-            if child_photos.len() > 2 {
-                child_photos.truncate(2);
+            if child_photos.len() > 50 {
+                child_photos.truncate(50);
             }
             let new_count = child_photos.len() as u32;
 

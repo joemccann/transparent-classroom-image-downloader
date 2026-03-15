@@ -2,13 +2,78 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::errors::AppError;
+use crate::core::events::AppEvent;
 use crate::core::orchestrator::PageFetcher;
 use crate::state::AppState;
 
 static FETCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Max retries for a single page fetch when the network fails.
+const PAGE_FETCH_MAX_RETRIES: u32 = 5;
+
+/// Base backoff in milliseconds for page fetch retries (doubles each attempt).
+const PAGE_FETCH_BASE_BACKOFF_MS: u64 = 2000;
+
+/// Perform a single WebView fetch: eval JS, wait for response via oneshot.
+async fn webview_fetch_once(
+    window: &tauri::WebviewWindow,
+    pending: &Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Result<String, String>>>>>,
+    url: &str,
+) -> Result<String, String> {
+    let request_id = format!("fetch-{}", FETCH_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    {
+        let mut map = pending.lock().await;
+        map.insert(request_id.clone(), tx);
+    }
+
+    let url_json = serde_json::to_string(url).unwrap_or_default();
+    let rid_json = serde_json::to_string(&request_id).unwrap_or_default();
+    let js = format!(
+        r#"(function() {{
+    var url = {url_json};
+    var rid = {rid_json};
+    fetch(url, {{ credentials: 'include' }})
+        .then(function(r) {{ return r.text(); }})
+        .then(function(html) {{
+            if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
+                window.__TAURI_INTERNALS__.invoke('deliver_page_html', {{
+                    requestId: rid,
+                    html: html,
+                    error: null
+                }});
+            }}
+        }})
+        .catch(function(e) {{
+            if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
+                window.__TAURI_INTERNALS__.invoke('deliver_page_html', {{
+                    requestId: rid,
+                    html: '',
+                    error: e.toString()
+                }});
+            }}
+        }});
+}})();"#,
+        url_json = url_json,
+        rid_json = rid_json,
+    );
+
+    window.eval(&js).map_err(|e| format!("eval failed: {}", e))?;
+
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("Response channel closed".to_string()),
+        Err(_) => {
+            let mut map = pending.lock().await;
+            map.remove(&request_id);
+            Err("Request timed out".to_string())
+        }
+    }
+}
 
 /// Start the download pipeline.
 ///
@@ -67,83 +132,60 @@ pub async fn start_download(
     tokio::time::sleep(Duration::from_secs(3)).await;
     println!("[JOBS] fetcher webview ready");
 
-    // Build the page fetcher closure that uses the hidden webview to fetch HTML.
-    // When called, it:
-    //   1. Creates a oneshot channel for the response
-    //   2. Stores the sender in pending_fetches (keyed by request_id)
-    //   3. Evals a fetch() call in the hidden webview
-    //   4. The webview's fetch() result calls deliver_page_html via IPC
-    //   5. deliver_page_html resolves the oneshot, returning HTML to the caller
+    // Build the page fetcher closure with automatic retry + exponential backoff.
     let pending = state.pending_fetches.clone();
     let fw = fetcher_window.clone();
+    let app_handle = app.clone();
 
     let page_fetcher: PageFetcher = Arc::new(move |url: String| {
         let pending = pending.clone();
         let window = fw.clone();
+        let handle = app_handle.clone();
         Box::pin(async move {
-            let request_id = format!("fetch-{}", FETCH_COUNTER.fetch_add(1, Ordering::Relaxed));
-            let (tx, rx) = tokio::sync::oneshot::channel();
+            let mut last_error = String::new();
 
-            // Store the response channel
-            {
-                let mut map = pending.lock().await;
-                map.insert(request_id.clone(), tx);
-            }
-
-            // Build JavaScript that fetches the URL and delivers HTML back via IPC
-            let url_json = serde_json::to_string(&url).unwrap_or_default();
-            let rid_json = serde_json::to_string(&request_id).unwrap_or_default();
-            let js = format!(
-                r#"(function() {{
-    var url = {url_json};
-    var rid = {rid_json};
-    fetch(url, {{ credentials: 'include' }})
-        .then(function(r) {{ return r.text(); }})
-        .then(function(html) {{
-            if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-                window.__TAURI_INTERNALS__.invoke('deliver_page_html', {{
-                    requestId: rid,
-                    html: html,
-                    error: null
-                }});
-            }}
-        }})
-        .catch(function(e) {{
-            if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {{
-                window.__TAURI_INTERNALS__.invoke('deliver_page_html', {{
-                    requestId: rid,
-                    html: '',
-                    error: e.toString()
-                }});
-            }}
-        }});
-}})();"#,
-                url_json = url_json,
-                rid_json = rid_json,
-            );
-
-            println!("[JOBS] page_fetcher: requesting {}", url);
-            window.eval(&js).map_err(|e| format!("eval failed: {}", e))?;
-
-            // Wait for response with 30s timeout
-            match tokio::time::timeout(Duration::from_secs(30), rx).await {
-                Ok(Ok(result)) => {
-                    println!("[JOBS] page_fetcher: got response for {}, len={}",
-                        url, result.as_ref().map(|h| h.len()).unwrap_or(0));
-                    result
+            for attempt in 0..=PAGE_FETCH_MAX_RETRIES {
+                if attempt > 0 {
+                    let backoff = PAGE_FETCH_BASE_BACKOFF_MS * 2u64.pow(attempt - 1);
+                    println!(
+                        "[JOBS] page_fetcher: retry {}/{} for {} (waiting {}ms)",
+                        attempt, PAGE_FETCH_MAX_RETRIES, url, backoff
+                    );
+                    // Notify the frontend about the reconnection attempt
+                    let _ = handle.emit("tc-downloader-event", &AppEvent::RetryScheduled {
+                        item_id: url.clone(),
+                        attempt,
+                        delay_ms: backoff,
+                    });
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
                 }
-                Ok(Err(_)) => {
-                    println!("[JOBS] page_fetcher: channel closed for {}", url);
-                    Err("Response channel closed".to_string())
-                }
-                Err(_) => {
-                    println!("[JOBS] page_fetcher: timeout for {}", url);
-                    // Cleanup pending entry
-                    let mut map = pending.lock().await;
-                    map.remove(&request_id);
-                    Err("Timeout waiting for page fetch (30s)".to_string())
+
+                println!("[JOBS] page_fetcher: requesting {} (attempt {})", url, attempt + 1);
+
+                match webview_fetch_once(&window, &pending, &url).await {
+                    Ok(html) => {
+                        if attempt > 0 {
+                            println!("[JOBS] page_fetcher: recovered after {} retries for {}", attempt, url);
+                        }
+                        println!(
+                            "[JOBS] page_fetcher: got response for {}, len={}",
+                            url,
+                            html.len()
+                        );
+                        return Ok(html);
+                    }
+                    Err(e) => {
+                        println!("[JOBS] page_fetcher: attempt {} failed for {}: {}", attempt + 1, url, e);
+                        last_error = e;
+                    }
                 }
             }
+
+            Err(format!(
+                "Failed after {} retries: {}",
+                PAGE_FETCH_MAX_RETRIES + 1,
+                last_error
+            ))
         })
     });
 

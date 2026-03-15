@@ -1,9 +1,42 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { AppEvent, JobStatus } from "../types";
+import type { AppEvent, FailureReason, JobStatus } from "../types";
+
+export type DownloadPhase = "idle" | "scanning" | "downloading" | "complete" | "failed" | "cancelled";
+
+/** Convert a FailureReason enum to a user-friendly string. */
+function formatFailureReason(reason: FailureReason): string {
+  if (typeof reason === "string") {
+    switch (reason) {
+      case "network_timeout": return "Network timed out";
+      case "integrity_mismatch": return "File corrupted during download";
+      case "auth_expired": return "Session expired";
+      case "rate_limited": return "Rate limited — retrying shortly";
+      default: return reason;
+    }
+  }
+  if (typeof reason === "object" && reason !== null) {
+    if ("http_error" in reason) return `Server error (HTTP ${reason.http_error.status})`;
+    if ("io_error" in reason) return `File error: ${reason.io_error.message}`;
+    if ("unknown" in reason) return reason.unknown.message;
+  }
+  return "Unknown error";
+}
+
+export interface ScanChildProgress {
+  page: number;
+  totalPages: number;
+  photosFound: number;
+}
+
+export interface RetryInfo {
+  attempt: number;
+  delayMs: number;
+  startedAt: number;
+}
 
 export interface DownloadProgress {
-  phase: string;
+  phase: DownloadPhase;
   status: JobStatus | null;
   jobId: string | null;
   currentChild: string | null;
@@ -13,10 +46,13 @@ export interface DownloadProgress {
   skipped: number;
   total: number;
   bytesDownloaded: number;
-  scanProgress: Map<string, { page: number; totalPages: number; photosFound: number }>;
+  scanProgress: Map<string, ScanChildProgress>;
+  scanTotalFound: number;
   errors: string[];
   isRunning: boolean;
   isComplete: boolean;
+  downloadStartedAt: number | null;
+  retryInfo: RetryInfo | null;
 }
 
 const initialProgress: DownloadProgress = {
@@ -31,9 +67,12 @@ const initialProgress: DownloadProgress = {
   total: 0,
   bytesDownloaded: 0,
   scanProgress: new Map(),
+  scanTotalFound: 0,
   errors: [],
   isRunning: false,
   isComplete: false,
+  downloadStartedAt: null,
+  retryInfo: null,
 };
 
 export function useDownloadProgress() {
@@ -51,24 +90,24 @@ export function useDownloadProgress() {
         setProgress((prev) => {
           switch (data.type) {
             case "session_check_started":
-              return { ...prev, phase: "Checking session...", isRunning: true };
+              return { ...prev, isRunning: true };
 
             case "session_valid":
-              return { ...prev, phase: "Session valid" };
+              return prev;
 
             case "session_expired":
-              return { ...prev, phase: "Session expired", isRunning: false };
+              return { ...prev, phase: "failed", isRunning: false };
 
             case "auth_started":
-              return { ...prev, phase: "Authenticating..." };
+              return prev;
 
             case "auth_completed":
-              return { ...prev, phase: "Authenticated" };
+              return prev;
 
             case "auth_failed":
               return {
                 ...prev,
-                phase: "Auth failed",
+                phase: "failed",
                 errors: [...prev.errors, data.message],
                 isRunning: false,
               };
@@ -76,7 +115,7 @@ export function useDownloadProgress() {
             case "scan_started":
               return {
                 ...prev,
-                phase: `Scanning ${data.child_name}...`,
+                phase: "scanning",
                 currentChild: data.child_name,
                 isRunning: true,
               };
@@ -88,23 +127,24 @@ export function useDownloadProgress() {
                 totalPages: data.total_pages,
                 photosFound: data.photos_found,
               });
-              return { ...prev, scanProgress: newMap };
+              // Sum all children's found photos
+              let totalFound = 0;
+              newMap.forEach((v) => { totalFound += v.photosFound; });
+              return { ...prev, scanProgress: newMap, scanTotalFound: totalFound, retryInfo: null };
             }
 
             case "scan_completed":
-              return {
-                ...prev,
-                phase: `Found ${data.new_photos} new photos for ${data.child_name}`,
-              };
+              return prev;
 
             case "download_started":
               return {
                 ...prev,
-                phase: "Downloading...",
+                phase: "downloading",
                 jobId: data.job_id,
                 total: data.total_items,
                 status: "downloading",
                 isRunning: true,
+                downloadStartedAt: Date.now(),
               };
 
             case "download_item_started":
@@ -115,7 +155,7 @@ export function useDownloadProgress() {
               };
 
             case "download_item_completed":
-              return { ...prev, completed: prev.completed + 1 };
+              return { ...prev, completed: prev.completed + 1, retryInfo: null };
 
             case "download_item_failed":
               return {
@@ -123,7 +163,7 @@ export function useDownloadProgress() {
                 failed: prev.failed + 1,
                 errors: data.will_retry
                   ? prev.errors
-                  : [...prev.errors, `Failed: ${data.filename}`],
+                  : [...prev.errors, `${data.child_name || "Photo"}: ${formatFailureReason(data.reason)}`],
               };
 
             case "download_item_skipped":
@@ -143,7 +183,7 @@ export function useDownloadProgress() {
             case "job_completed":
               return {
                 ...prev,
-                phase: "Complete",
+                phase: "complete",
                 status: "completed",
                 completed: data.completed,
                 failed: data.failed,
@@ -156,24 +196,34 @@ export function useDownloadProgress() {
             case "job_failed":
               return {
                 ...prev,
-                phase: "Failed",
+                phase: "failed",
                 status: "failed",
-                errors: [...prev.errors, data.message],
+                errors: [...prev.errors, typeof data.message === "string" ? data.message : "Download failed"],
                 isRunning: false,
               };
 
             case "job_paused":
-              return { ...prev, phase: "Paused", status: "paused" };
+              return { ...prev, status: "paused" };
 
             case "job_resumed":
-              return { ...prev, phase: "Downloading...", status: "downloading" };
+              return { ...prev, status: "downloading" };
 
             case "job_cancelled":
               return {
                 ...prev,
-                phase: "Cancelled",
+                phase: "cancelled",
                 status: "cancelled",
                 isRunning: false,
+              };
+
+            case "retry_scheduled":
+              return {
+                ...prev,
+                retryInfo: {
+                  attempt: data.attempt,
+                  delayMs: data.delay_ms,
+                  startedAt: Date.now(),
+                },
               };
 
             case "warning":
