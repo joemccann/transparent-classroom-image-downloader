@@ -13,7 +13,11 @@ A native desktop app — no terminal, Node.js, or setup required.
 | Windows (exe) | [TC.Photo.Downloader.exe](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC.Photo.Downloader_0.1.0_x64-setup.exe) |
 | Windows (msi) | [TC.Photo.Downloader.msi](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC.Photo.Downloader_0.1.0_x64_en-US.msi) |
 
-> **Note**: On macOS you may need to right-click and select "Open" the first time, since the app is not notarized.
+> **macOS users**: The app is not notarized with Apple, so macOS will show a "damaged" warning. After mounting the .dmg and dragging to Applications, run this in Terminal:
+> ```bash
+> xattr -cr "/Applications/TC Photo Downloader.app"
+> ```
+> Then open the app normally. You only need to do this once.
 
 ### How the Desktop App Works
 
