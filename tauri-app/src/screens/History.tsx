@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { useApp } from "../state/app";
 import * as api from "../lib/tauri";
 
-type JobRow = [string, string, string, number, number]; // id, status, created_at, completed, total
+type JobRow = [string, string, string, number, number, number, number]; // id, status, created_at, completed, failed, skipped, total
 
 export function History() {
   const { setScreen } = useApp();
@@ -53,7 +53,7 @@ export function History() {
 
         {!loading && jobs.length > 0 && (
           <div className="space-y-2">
-            {jobs.map(([id, status, createdAt, completed, total]) => (
+            {jobs.map(([id, status, createdAt, completed, failed, skipped, total]) => (
               <div
                 key={id}
                 className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3"
@@ -61,6 +61,12 @@ export function History() {
                 <div>
                   <p className="text-sm text-zinc-200">
                     {completed}/{total} photos
+                    {skipped > 0 && (
+                      <span className="text-zinc-500"> ({skipped} skipped)</span>
+                    )}
+                    {failed > 0 && (
+                      <span className="text-red-400"> ({failed} failed)</span>
+                    )}
                   </p>
                   <p className="text-xs text-zinc-500">
                     {new Date(createdAt).toLocaleDateString()} &middot;{" "}
@@ -78,7 +84,7 @@ export function History() {
                           : "bg-zinc-800 text-zinc-400"
                   }`}
                 >
-                  {status}
+                  {status === "CompletedWithErrors" ? "Partial" : status}
                 </span>
               </div>
             ))}

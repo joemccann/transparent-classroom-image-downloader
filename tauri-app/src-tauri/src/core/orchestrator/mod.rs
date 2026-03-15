@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -12,6 +13,9 @@ use crate::core::http::TcHttpClient;
 use crate::core::models::{AppSettings, DownloadItemStatus, DownloadJob, JobStatus, Photo};
 use crate::core::scrape;
 use crate::core::storage::Storage;
+
+/// Download concurrency: how many photos to download simultaneously.
+const DOWNLOAD_CONCURRENCY: usize = 10;
 
 /// Function type for fetching HTML via the WebView (which has session cookies).
 pub type PageFetcher = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>> + Send + Sync>;
@@ -122,6 +126,8 @@ impl Orchestrator {
     }
 
     /// Run the full scan + download pipeline for all configured children.
+    /// Phase 1 scans all children in parallel, Phase 2 downloads all photos
+    /// in a single high-concurrency pool.
     pub async fn run_download(&self, settings: &AppSettings) -> AppResult<DownloadJob> {
         let mut job = DownloadJob::new(settings.clone());
         job.status = JobStatus::Scanning;
@@ -137,79 +143,105 @@ impl Orchestrator {
             total_items: 0,
         });
 
-        // ── Phase 1: Scan all children ──
-        let mut all_photos: Vec<(Photo, String)> = Vec::new(); // (photo, child_name)
-
+        // ── Phase 1: Scan all children in parallel ──
+        // Emit ScanStarted for all children upfront
         for child in &settings.children {
-            if self.controls.is_cancelled() {
-                job.status = JobStatus::Cancelled;
-                self.emit(AppEvent::JobCancelled {
-                    job_id: job.id.clone(),
-                });
-                let storage = self.storage.lock().await;
-                storage.save_job(&job)?;
-                return Ok(job);
-            }
-
             self.emit(AppEvent::ScanStarted {
                 child_name: child.name.clone(),
             });
+        }
 
-            let known_hashes = {
+        // Gather known hashes for all children
+        let mut child_known_hashes: Vec<HashSet<String>> = Vec::new();
+        for child in &settings.children {
+            let known = {
                 let storage = self.storage.lock().await;
                 storage.get_downloaded_hashes(&child.id)?
             };
+            child_known_hashes.push(known);
+        }
 
+        // Launch parallel scans — one future per child
+        let mut scan_futures = Vec::new();
+        for (i, child) in settings.children.iter().enumerate() {
             let event_sender = self.event_sender.clone();
-            let child_name_clone = child.name.clone();
+            let child_name = child.name.clone();
+            let child_id = child.id.clone();
+            let school_id = settings.school_id.clone();
+            let known_hashes = child_known_hashes[i].clone();
+            let page_fetcher = self.page_fetcher.clone();
+            let client = self.client.clone();
 
-            // Create a fetch function that uses our WebView-based fetcher
-            let fetch_fn = |url: String| {
-                let fetcher = self.page_fetcher.clone();
-                let client = self.client.clone();
-                async move {
-                    if let Some(ref f) = fetcher {
-                        f(url.clone())
-                            .await
-                            .map_err(|e| AppError::NetworkError(format!("WebView fetch: {}", e)))
-                    } else {
-                        client.get_html(&url).await
+            let fut = async move {
+                let fetch_fn = |url: String| {
+                    let fetcher = page_fetcher.clone();
+                    let client = client.clone();
+                    async move {
+                        if let Some(ref f) = fetcher {
+                            f(url.clone())
+                                .await
+                                .map_err(|e| AppError::NetworkError(format!("WebView fetch: {}", e)))
+                        } else {
+                            client.get_html(&url).await
+                        }
                     }
-                }
+                };
+
+                let child_name_for_progress = child_name.clone();
+                let sender = event_sender.clone();
+
+                let scan_result = scrape::scrape_child_photos(
+                    &fetch_fn,
+                    &school_id,
+                    &child_id,
+                    &child_name,
+                    &known_hashes,
+                    move |page, total_pages, photos_found| {
+                        let _ = sender.send(AppEvent::ScanProgress {
+                            child_name: child_name_for_progress.clone(),
+                            page,
+                            total_pages,
+                            photos_found,
+                        });
+                    },
+                )
+                .await?;
+
+                Ok::<_, AppError>((child_name.clone(), scan_result))
             };
 
-            let scan_result = scrape::scrape_child_photos(
-                &fetch_fn,
-                &settings.school_id,
-                &child.id,
-                &child.name,
-                &known_hashes,
-                move |page, total_pages, photos_found| {
-                    let _ = event_sender.send(AppEvent::ScanProgress {
-                        child_name: child_name_clone.clone(),
-                        page,
-                        total_pages,
-                        photos_found,
-                    });
-                },
-            )
-            .await?;
+            scan_futures.push(fut);
+        }
 
-            // DEV LIMIT: only take first 50 photos per child for testing
-            let mut child_photos = scan_result.photos;
-            if child_photos.len() > 50 {
-                child_photos.truncate(50);
-            }
+        let scan_results = futures::future::join_all(scan_futures).await;
+
+        // Check for cancellation
+        if self.controls.is_cancelled() {
+            job.status = JobStatus::Cancelled;
+            self.emit(AppEvent::JobCancelled {
+                job_id: job.id.clone(),
+            });
+            let storage = self.storage.lock().await;
+            storage.save_job(&job)?;
+            return Ok(job);
+        }
+
+        // Collect all photos from scan results
+        let mut all_photos: Vec<(Photo, String)> = Vec::new();
+
+        for result in scan_results {
+            let (child_name, scan_result) = result?;
+            let child_photos = scan_result.photos;
             let new_count = child_photos.len() as u32;
 
             self.emit(AppEvent::ScanCompleted {
-                child_name: child.name.clone(),
+                child_name: child_name.clone(),
                 total_photos: scan_result.total_expected,
                 new_photos: new_count,
             });
 
             for photo in child_photos {
-                all_photos.push((photo, child.name.clone()));
+                all_photos.push((photo, child_name.clone()));
             }
         }
 
@@ -228,7 +260,7 @@ impl Orchestrator {
             return Ok(job);
         }
 
-        // ── Phase 2: Download ──
+        // ── Phase 2: Download all photos in a single high-concurrency pool ──
         job.status = JobStatus::Downloading;
         job.total_items = all_photos.len() as u32;
 
@@ -237,84 +269,81 @@ impl Orchestrator {
             total_items: job.total_items,
         });
 
-        // Group photos by child for parallel downloading
-        let mut photos_by_child: std::collections::HashMap<String, (Vec<Photo>, String)> =
-            std::collections::HashMap::new();
-
-        for (photo, child_name) in all_photos {
-            let child_id = photo.child_id.clone();
-            photos_by_child
-                .entry(child_id)
-                .or_insert_with(|| (Vec::new(), child_name))
-                .0
-                .push(photo);
+        // Build a merged set of all known hashes across all children
+        let mut all_known_hashes = HashSet::new();
+        for hashes in &child_known_hashes {
+            all_known_hashes.extend(hashes.iter().cloned());
         }
 
-        let storage = self.storage.clone();
-        let event_sender = self.event_sender.clone();
-        let job_id = job.id.clone();
+        // Build a map from child_id → child_name for folder routing
+        let child_name_map: std::collections::HashMap<String, String> = all_photos
+            .iter()
+            .map(|(p, name)| (p.child_id.clone(), name.clone()))
+            .collect();
+
+        // Flatten all photos into a single list
+        let mut photos_to_download: Vec<Photo> = all_photos.into_iter().map(|(p, _)| p).collect();
 
         let mut total_completed = 0u32;
         let mut total_failed = 0u32;
         let mut total_skipped = 0u32;
         let mut total_bytes = 0u64;
 
-        for (child_id, (photos, child_name)) in photos_by_child {
-            if self.controls.is_cancelled() {
+        // Download with automatic retry passes for failed items
+        const MAX_RETRY_PASSES: u32 = 3;
+        for pass in 0..=MAX_RETRY_PASSES {
+            if photos_to_download.is_empty() || self.controls.is_cancelled() {
                 break;
             }
 
-            let known_hashes = {
-                let s = storage.lock().await;
-                s.get_downloaded_hashes(&child_id)?
-            };
+            if pass > 0 {
+                info!(
+                    "Retry pass {}/{}: {} photos to retry",
+                    pass, MAX_RETRY_PASSES, photos_to_download.len()
+                );
+                // Brief delay before retry pass
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
 
-            let sender = event_sender.clone();
-            let sender2 = event_sender.clone();
-            let sender3 = event_sender.clone();
-            let sender4 = event_sender.clone();
-            let child_name2 = child_name.clone();
-            let child_name3 = child_name.clone();
-            let child_name4 = child_name.clone();
+            let es = self.event_sender.clone();
+            let es2 = self.event_sender.clone();
+            let es3 = self.event_sender.clone();
+            let es4 = self.event_sender.clone();
 
             let results = download::download_photos(
                 &self.client,
-                photos,
+                photos_to_download,
                 &settings.output_dir,
-                &child_name,
-                &known_hashes,
-                settings.concurrency as usize,
+                &child_name_map,
+                &all_known_hashes,
+                DOWNLOAD_CONCURRENCY,
                 &self.controls,
-                // on_item_start
                 move |item_id: &str, filename: &str| {
-                    let _ = sender.send(AppEvent::DownloadItemStarted {
+                    let _ = es.send(AppEvent::DownloadItemStarted {
                         item_id: item_id.to_string(),
-                        child_name: child_name2.clone(),
+                        child_name: String::new(),
                         filename: filename.to_string(),
                     });
                 },
-                // on_item_complete
                 move |item_id: &str, dest_path: &str, _bytes: u64| {
-                    let _ = sender2.send(AppEvent::DownloadItemCompleted {
+                    let _ = es2.send(AppEvent::DownloadItemCompleted {
                         item_id: item_id.to_string(),
-                        child_name: child_name3.clone(),
+                        child_name: String::new(),
                         filename: dest_path.to_string(),
                         dest_path: dest_path.to_string(),
                     });
                 },
-                // on_item_failed
                 move |item_id: &str, reason: &crate::core::models::FailureReason, will_retry: bool| {
-                    let _ = sender3.send(AppEvent::DownloadItemFailed {
+                    let _ = es3.send(AppEvent::DownloadItemFailed {
                         item_id: item_id.to_string(),
-                        child_name: child_name4.clone(),
+                        child_name: String::new(),
                         filename: String::new(),
                         reason: reason.clone(),
                         will_retry,
                     });
                 },
-                // on_item_skipped
                 move |item_id: &str, reason: &str| {
-                    let _ = sender4.send(AppEvent::DownloadItemSkipped {
+                    let _ = es4.send(AppEvent::DownloadItemSkipped {
                         item_id: item_id.to_string(),
                         child_name: String::new(),
                         reason: reason.to_string(),
@@ -323,35 +352,56 @@ impl Orchestrator {
             )
             .await?;
 
-            // Update storage and counters
-            let s = storage.lock().await;
-            for result in &results {
-                match result.status {
-                    DownloadItemStatus::Completed => {
-                        total_completed += 1;
-                        total_bytes += result.bytes_downloaded;
-                        s.mark_downloaded(
-                            &result.photo.hash,
-                            &result.photo.child_id,
-                            result.dest_path.as_ref().map(|p| p.to_str().unwrap_or("")),
-                        )?;
+            // Tally results and collect failed photos for retry
+            let mut failed_photos = Vec::new();
+            {
+                let s = self.storage.lock().await;
+                for result in results {
+                    match result.status {
+                        DownloadItemStatus::Completed => {
+                            total_completed += 1;
+                            total_bytes += result.bytes_downloaded;
+                            s.mark_downloaded(
+                                &result.photo.hash,
+                                &result.photo.child_id,
+                                result.dest_path.as_ref().map(|p| p.to_str().unwrap_or("")),
+                            )?;
+                            // Add to known hashes so retries don't re-download
+                            all_known_hashes.insert(result.photo.hash.clone());
+                        }
+                        DownloadItemStatus::Failed => {
+                            failed_photos.push(result.photo);
+                        }
+                        DownloadItemStatus::Skipped => {
+                            total_skipped += 1;
+                        }
+                        _ => {}
                     }
-                    DownloadItemStatus::Failed => total_failed += 1,
-                    DownloadItemStatus::Skipped => total_skipped += 1,
-                    _ => {}
                 }
             }
 
-            // Emit aggregate progress
+            // Emit progress after this pass
             self.emit(AppEvent::JobProgress {
-                job_id: job_id.clone(),
+                job_id: job.id.clone(),
                 status: JobStatus::Downloading,
                 completed: total_completed,
-                failed: total_failed,
+                failed: failed_photos.len() as u32,
                 skipped: total_skipped,
                 total: job.total_items,
                 bytes_downloaded: total_bytes,
             });
+
+            if failed_photos.is_empty() {
+                break; // All done, no retries needed
+            }
+
+            if pass == MAX_RETRY_PASSES {
+                // Final pass — count remaining failures
+                total_failed = failed_photos.len() as u32;
+                info!("{} photos failed after all retry passes", total_failed);
+            }
+
+            photos_to_download = failed_photos;
         }
 
         // ── Phase 3: Finalize ──
@@ -388,7 +438,7 @@ impl Orchestrator {
         }
 
         {
-            let s = storage.lock().await;
+            let s = self.storage.lock().await;
             s.save_job(&job)?;
         }
 

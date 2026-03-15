@@ -13,7 +13,7 @@ use crate::core::errors::{AppError, AppResult};
 use crate::core::http::TcHttpClient;
 use crate::core::models::{DownloadItemStatus, FailureReason, Photo};
 
-const MAX_RETRIES: u32 = 3;
+const MAX_RETRIES: u32 = 5;
 const BASE_BACKOFF_MS: u64 = 1000;
 const MAX_FILENAME_LEN: usize = 200;
 
@@ -64,11 +64,12 @@ pub struct DownloadResult {
 }
 
 /// Download a batch of photos with bounded parallelism.
+/// `child_name_map` maps child_id → child_name for folder routing.
 pub async fn download_photos(
     client: &TcHttpClient,
     photos: Vec<Photo>,
     output_dir: &str,
-    child_name: &str,
+    child_name_map: &std::collections::HashMap<String, String>,
     known_hashes: &HashSet<String>,
     concurrency: usize,
     controls: &DownloadControls,
@@ -77,8 +78,8 @@ pub async fn download_photos(
     on_item_failed: impl Fn(&str, &FailureReason, bool) + Send + Sync, // (item_id, reason, will_retry)
     on_item_skipped: impl Fn(&str, &str) + Send + Sync,        // (item_id, reason)
 ) -> AppResult<Vec<DownloadResult>> {
-    let base_dir = PathBuf::from(output_dir).join(child_name);
-    fs::create_dir_all(&base_dir).await?;
+    let output_base = PathBuf::from(output_dir);
+    let name_map = Arc::new(child_name_map.clone());
 
     let completed_count = Arc::new(AtomicU32::new(0));
 
@@ -90,7 +91,8 @@ pub async fn download_photos(
     let results: Vec<DownloadResult> = stream::iter(photos)
         .map(|photo| {
             let client = client.clone();
-            let base_dir = base_dir.clone();
+            let output_base = output_base.clone();
+            let name_map = name_map.clone();
             let known = known_hashes.clone();
             let controls = controls.clone();
             let completed = completed_count.clone();
@@ -137,6 +139,13 @@ pub async fn download_photos(
                     };
                 }
 
+                // Resolve child folder name
+                let child_folder = name_map
+                    .get(&photo.child_id)
+                    .cloned()
+                    .unwrap_or_else(|| photo.child_id.clone());
+                let base_dir = output_base.join(&child_folder);
+
                 let filename = build_filename(&photo);
                 let year = photo.year.as_deref().unwrap_or("unknown");
                 let year_dir = base_dir.join(year);
@@ -170,7 +179,7 @@ pub async fn download_photos(
 
                 on_start(&photo.hash, &filename);
 
-                // Download with retry
+                // Download with retry + rate-limit backoff
                 let result =
                     download_with_retry(&client, &photo, &dest_path, &on_failed).await;
 

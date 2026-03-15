@@ -145,16 +145,29 @@ export function DownloadRun() {
             )}
 
             {phase === "scanning" && (
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 {progress.scanProgress.size > 0 ? (
-                  Array.from(progress.scanProgress.entries()).map(([child, sp]) => (
-                    <div key={child} className="flex items-baseline justify-between text-sm">
-                      <span className="text-zinc-300">{child}</span>
-                      <span className="text-xs text-zinc-500">
-                        page {sp.page}/{sp.totalPages} &middot; {sp.photosFound} photos found
-                      </span>
-                    </div>
-                  ))
+                  Array.from(progress.scanProgress.entries()).map(([child, sp]) => {
+                    const scanPct = sp.totalPages > 0 ? Math.round((sp.page / sp.totalPages) * 100) : 0;
+                    return (
+                      <div key={child} className="space-y-1">
+                        <div className="flex items-baseline justify-between text-sm">
+                          <span className="text-zinc-300">{child}</span>
+                          <span className="text-xs text-zinc-500">
+                            {sp.page}/{sp.totalPages} pages &middot; {sp.photosFound} photos
+                          </span>
+                        </div>
+                        <div className="h-1 overflow-hidden rounded-full bg-zinc-800">
+                          <motion.div
+                            className="h-full rounded-full bg-zinc-500"
+                            initial={{ width: 0 }}
+                            animate={{ width: `${scanPct}%` }}
+                            transition={{ duration: 0.2, ease: "easeOut" }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })
                 ) : (
                   <p className="text-sm text-zinc-500">Connecting to Transparent Classroom...</p>
                 )}

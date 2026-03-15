@@ -240,7 +240,7 @@ pub async fn cancel_download(app: AppHandle) -> Result<(), AppError> {
 pub async fn get_job_history(
     app: AppHandle,
     limit: Option<u32>,
-) -> Result<Vec<(String, String, String, u32, u32)>, AppError> {
+) -> Result<Vec<(String, String, String, u32, u32, u32, u32)>, AppError> {
     let state = app.state::<AppState>();
     let storage = state.storage.lock().await;
     storage.get_recent_jobs(limit.unwrap_or(10))

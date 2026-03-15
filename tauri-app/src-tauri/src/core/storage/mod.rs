@@ -210,11 +210,11 @@ impl Storage {
         Ok(())
     }
 
-    pub fn get_recent_jobs(&self, limit: u32) -> AppResult<Vec<(String, String, String, u32, u32)>> {
+    pub fn get_recent_jobs(&self, limit: u32) -> AppResult<Vec<(String, String, String, u32, u32, u32, u32)>> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, status, created_at, completed_items, total_items
+                "SELECT id, status, created_at, completed_items, failed_items, skipped_items, total_items
                  FROM jobs ORDER BY created_at DESC LIMIT ?1",
             )
             .map_err(|e| AppError::StorageError(e.to_string()))?;
@@ -227,6 +227,8 @@ impl Storage {
                     row.get::<_, String>(2)?,
                     row.get::<_, u32>(3)?,
                     row.get::<_, u32>(4)?,
+                    row.get::<_, u32>(5)?,
+                    row.get::<_, u32>(6)?,
                 ))
             })
             .map_err(|e| AppError::StorageError(e.to_string()))?

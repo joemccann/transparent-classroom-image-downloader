@@ -113,7 +113,7 @@ export async function cancelDownload(): Promise<void> {
 
 export async function getJobHistory(
   limit?: number
-): Promise<[string, string, string, number, number][]> {
+): Promise<[string, string, string, number, number, number, number][]> {
   return invoke("get_job_history", { limit });
 }
 

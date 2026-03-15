@@ -2,6 +2,7 @@ mod selectors;
 
 use std::collections::HashSet;
 
+use futures::stream::{self, StreamExt};
 use scraper::{Html, Selector};
 use tracing::{debug, info};
 
@@ -9,6 +10,9 @@ use crate::core::errors::{AppError, AppResult};
 use crate::core::models::Photo;
 
 pub use selectors::*;
+
+/// Max concurrent page fetches during scanning.
+const SCAN_CONCURRENCY: usize = 5;
 
 const BASE_URL: &str = "https://www.transparentclassroom.com";
 
@@ -180,10 +184,10 @@ pub struct ScrapeResult {
     pub early_exit: bool,
 }
 
-/// Scrape all photos for a child, with early-exit when hitting known hashes.
+/// Scrape all photos for a child using parallel page fetching.
+/// Fetches page 1 to discover total pages, then fetches all remaining pages
+/// concurrently (up to SCAN_CONCURRENCY at a time).
 /// Returns only new photos not in `known_hashes`.
-/// `fetch_html` is used to get page HTML — it may use the WebView (with session
-/// cookies) or reqwest.
 pub async fn scrape_child_photos<F, Fut>(
     fetch_html: &F,
     school_id: &str,
@@ -198,7 +202,7 @@ where
 {
     info!("Scraping photos for {} ({})", child_name, child_id);
 
-    // Fetch first page
+    // ── Fetch page 1 to discover total page count ──
     let first_url = photos_url(school_id, child_id, 1);
     let first_html_text = fetch_html(first_url).await?;
 
@@ -208,7 +212,7 @@ where
         return Err(AppError::SessionExpired);
     }
 
-    // Parse first page in a sync block (scraper::Html is !Send)
+    // Parse first page (scraper::Html is !Send, so parse in sync block)
     let (metadata, first_page_photos) = {
         let html = Html::parse_document(&first_html_text);
         let meta = parse_page_metadata(&html);
@@ -224,10 +228,8 @@ where
     let mut all_photos: Vec<Photo> = Vec::new();
     let mut seen_hashes = HashSet::new();
     let mut early_exit = false;
-    let mut pages_scraped = 0u32;
 
     // Process page 1 results
-    pages_scraped += 1;
     for photo in first_page_photos {
         if seen_hashes.contains(&photo.hash) {
             continue;
@@ -245,28 +247,56 @@ where
 
     on_progress(1, metadata.max_page, all_photos.len() as u32);
 
-    // Scrape remaining pages
-    if !early_exit {
-        for page_num in 2..=metadata.max_page {
-            let page_url = photos_url(school_id, child_id, page_num);
-            debug!("  Scraping page {}/{}", page_num, metadata.max_page);
+    // ── Fetch remaining pages in parallel ──
+    if !early_exit && metadata.max_page > 1 {
+        info!(
+            "{}: Fetching pages 2-{} in parallel (concurrency={})",
+            child_name, metadata.max_page, SCAN_CONCURRENCY
+        );
 
-            let page_html_text = fetch_html(page_url).await?;
+        // Fetch pages in parallel, parse photos immediately as each arrives
+        // to keep the running photo count accurate for progress reporting.
+        let mut page_results: Vec<(u32, Vec<Photo>)> = Vec::new();
+        let mut pages_fetched = 1u32; // page 1 already done
+        let mut running_photo_count = all_photos.len() as u32;
 
-            // Parse in sync block (scraper::Html is !Send)
+        let mut page_stream = stream::iter(2..=metadata.max_page)
+            .map(|page_num| {
+                let url = photos_url(school_id, child_id, page_num);
+                async move {
+                    debug!("  Fetching page {}", page_num);
+                    let result = fetch_html(url).await;
+                    (page_num, result)
+                }
+            })
+            .buffer_unordered(SCAN_CONCURRENCY);
+
+        while let Some((page_num, result)) = page_stream.next().await {
+            let html_text = result?;
+            pages_fetched += 1;
+
+            // Parse photos immediately so the count is up to date
             let page_photos = {
-                let html = Html::parse_document(&page_html_text);
+                let html = Html::parse_document(&html_text);
                 parse_photos_from_page(&html, child_id)
             };
-            pages_scraped += 1;
+            running_photo_count += page_photos.len() as u32;
 
+            on_progress(pages_fetched, metadata.max_page, running_photo_count);
+            page_results.push((page_num, page_photos));
+        }
+
+        // Sort by page number for ordered dedup and early-exit logic
+        page_results.sort_by_key(|(page_num, _)| *page_num);
+
+        for (page_num, page_photos) in page_results {
             for photo in page_photos {
                 if seen_hashes.contains(&photo.hash) {
                     continue;
                 }
                 if known_hashes.contains(&photo.hash) {
                     info!(
-                        "  Found known photo on page {}, stopping pagination",
+                        "  Found known photo on page {}, stopping processing",
                         page_num
                     );
                     early_exit = true;
@@ -276,16 +306,18 @@ where
                 all_photos.push(photo);
             }
 
-            on_progress(page_num, metadata.max_page, all_photos.len() as u32);
-
             if early_exit {
                 break;
             }
-
-            // Polite delay between pages
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
     }
+
+    let pages_scraped = if early_exit {
+        // We fetched all pages in parallel but may have stopped processing early
+        metadata.max_page
+    } else {
+        metadata.max_page
+    };
 
     info!(
         "{}: Found {} new photos ({}/{} pages scraped, early_exit={})",
