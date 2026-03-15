@@ -8,9 +8,10 @@ A native desktop app — no terminal, Node.js, or setup required.
 
 | Platform | Download |
 |----------|----------|
-| macOS (Apple Silicon) | [TC-Photo-Downloader.dmg (arm64)](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC-Photo-Downloader_0.1.0_aarch64.dmg) |
-| macOS (Intel) | [TC-Photo-Downloader.dmg (x64)](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC-Photo-Downloader_0.1.0_x64.dmg) |
-| Windows | [TC-Photo-Downloader.msi](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC-Photo-Downloader_0.1.0_x64-setup.msi) |
+| macOS (Apple Silicon) | [TC.Photo.Downloader.dmg (arm64)](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC.Photo.Downloader_0.1.0_aarch64.dmg) |
+| macOS (Intel) | [TC.Photo.Downloader.dmg (x64)](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC.Photo.Downloader_0.1.0_x64.dmg) |
+| Windows (exe) | [TC.Photo.Downloader.exe](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC.Photo.Downloader_0.1.0_x64-setup.exe) |
+| Windows (msi) | [TC.Photo.Downloader.msi](https://github.com/joemccann/transparent-classroom-image-downloader/releases/latest/download/TC.Photo.Downloader_0.1.0_x64_en-US.msi) |
 
 > **Note**: On macOS you may need to right-click and select "Open" the first time, since the app is not notarized.
 
