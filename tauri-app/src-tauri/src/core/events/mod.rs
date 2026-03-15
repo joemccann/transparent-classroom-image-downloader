@@ -13,6 +13,12 @@ pub enum AppEvent {
     AuthFailed {
         message: String,
     },
+    SchoolDetected {
+        school_id: String,
+    },
+    ChildPageDetected {
+        child_id: String,
+    },
 
     // ── Session ──
     SessionValid,

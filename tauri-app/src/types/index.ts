@@ -108,7 +108,9 @@ export type AppEvent =
   | { type: "job_resumed"; job_id: string }
   | { type: "job_cancelled"; job_id: string }
   | { type: "warning"; message: string }
-  | { type: "retry_scheduled"; item_id: string; attempt: number; delay_ms: number };
+  | { type: "retry_scheduled"; item_id: string; attempt: number; delay_ms: number }
+  | { type: "school_detected"; school_id: string }
+  | { type: "child_page_detected"; child_id: string };
 
 export type FailureReason =
   | "network_timeout"
@@ -122,9 +124,9 @@ export type FailureReason =
 // ── App screen ──
 
 export type Screen =
-  | "onboarding"
-  | "destination"
   | "auth"
+  | "children_setup"
+  | "destination"
   | "scan_review"
   | "download"
   | "complete"

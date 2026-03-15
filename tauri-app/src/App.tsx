@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { useEffect, useState } from "react";
+import { AnimatePresence } from "framer-motion";
 
 import { AppContext } from "./state/app";
 import type { AppSettings, Screen } from "./types";
 import * as api from "./lib/tauri";
 
 import { StepIndicator } from "./components/common/StepIndicator";
-import { Onboarding } from "./screens/Onboarding";
+import { ChildrenSetup } from "./screens/ChildrenSetup";
 import { DestinationSetup } from "./screens/DestinationSetup";
 import { AuthConnect } from "./screens/AuthConnect";
 import { ScanReview } from "./screens/ScanReview";
@@ -15,15 +15,15 @@ import { Complete } from "./screens/Complete";
 import { History } from "./screens/History";
 import { Settings } from "./screens/Settings";
 
-const SETUP_STEPS = ["Credentials", "Folder", "Auth", "Download"];
+const SETUP_STEPS = ["Auth", "Children", "Folder", "Download"];
 
 function getStepIndex(screen: Screen): number {
   switch (screen) {
-    case "onboarding":
-      return 0;
-    case "destination":
-      return 1;
     case "auth":
+      return 0;
+    case "children_setup":
+      return 1;
+    case "destination":
       return 2;
     case "scan_review":
     case "download":
@@ -35,11 +35,12 @@ function getStepIndex(screen: Screen): number {
 }
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("onboarding");
+  const [screen, setScreen] = useState<Screen>("auth");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [sessionValid, setSessionValid] = useState(false);
   const [isFirstRun, setIsFirstRun] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [schoolId, setSchoolId] = useState<string | null>(null);
 
   // Load saved settings on mount
   useEffect(() => {
@@ -85,6 +86,8 @@ export default function App() {
         sessionValid,
         setSessionValid,
         isFirstRun,
+        schoolId,
+        setSchoolId,
       }}
     >
       <div className="flex h-screen flex-col bg-zinc-950">
@@ -125,7 +128,7 @@ export default function App() {
         <main className="flex-1 overflow-hidden px-4 pb-4 pt-4">
           <div className="mx-auto h-full max-w-lg">
             <AnimatePresence mode="wait">
-              {screen === "onboarding" && <Onboarding key="onboarding" />}
+              {screen === "children_setup" && <ChildrenSetup key="children_setup" />}
               {screen === "destination" && <DestinationSetup key="destination" />}
               {screen === "auth" && <AuthConnect key="auth" />}
               {screen === "scan_review" && <ScanReview key="scan_review" />}

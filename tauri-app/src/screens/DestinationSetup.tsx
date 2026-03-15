@@ -102,7 +102,7 @@ export function DestinationSetup() {
       </div>
 
       <div className="mt-8 flex justify-between">
-        <button onClick={() => setScreen("onboarding")} className="btn-secondary">
+        <button onClick={() => setScreen("children_setup")} className="btn-secondary">
           Back
         </button>
         <button onClick={handleNext} disabled={saving} className="btn-primary">

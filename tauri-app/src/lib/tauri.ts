@@ -33,12 +33,20 @@ export async function checkSession(): Promise<boolean> {
   return invoke("check_session");
 }
 
+export async function openAuthWindow(): Promise<void> {
+  return invoke("open_auth_window");
+}
+
 export async function completeAuth(cookies: string): Promise<boolean> {
   return invoke("complete_auth", { cookies });
 }
 
 export async function logout(): Promise<void> {
   return invoke("logout");
+}
+
+export async function closeAuthWindow(): Promise<void> {
+  return invoke("close_auth_window");
 }
 
 export async function getLoginUrl(): Promise<string> {

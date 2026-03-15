@@ -16,7 +16,6 @@ function formatBytes(bytes: number): string {
 export function DownloadRun() {
   const { setScreen } = useApp();
   const { progress, reset } = useDownloadProgress();
-  const [started, setStarted] = useState(false);
   const [jobError, setJobError] = useState<string | null>(null);
   const startedRef = useRef(false);
 
@@ -28,7 +27,6 @@ export function DownloadRun() {
       const msg = e instanceof Error ? e.message : String(e);
       setJobError(msg);
     });
-    setStarted(true);
   }, []);
 
   // Navigate to complete screen when done

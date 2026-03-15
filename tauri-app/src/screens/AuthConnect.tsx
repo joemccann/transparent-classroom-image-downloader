@@ -1,104 +1,70 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { listen } from "@tauri-apps/api/event";
 import { useApp } from "../state/app";
 import * as api from "../lib/tauri";
 
-type AuthState = "idle" | "waiting" | "validating" | "success" | "failed";
+type AuthState = "idle" | "waiting" | "success" | "failed";
 
 export function AuthConnect() {
-  const { setScreen, setSessionValid } = useApp();
+  const { setScreen, setSessionValid, setSchoolId, schoolId } = useApp();
   const [authState, setAuthState] = useState<AuthState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const pollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const authWindowRef = useRef<WebviewWindow | null>(null);
 
-  // Clean up on unmount
+  // Listen for auth events from the Rust backend
   useEffect(() => {
+    const unlistenPromise = listen("tc-downloader-event", (event: any) => {
+      const data = event.payload;
+      console.log("[AUTH] event received:", data);
+      if (!data || !data.type) return;
+
+      switch (data.type) {
+        case "auth_completed":
+          console.log("[AUTH] auth_completed event");
+          setAuthState("success");
+          setSessionValid(true);
+          break;
+        case "auth_failed":
+          console.log("[AUTH] auth_failed event:", data.message);
+          setAuthState("failed");
+          setError(data.message || "Authentication failed.");
+          break;
+        case "school_detected":
+          console.log("[AUTH] school_detected:", data.school_id);
+          setSchoolId(data.school_id);
+          break;
+      }
+    });
+
     return () => {
-      if (pollerRef.current) clearInterval(pollerRef.current);
-      authWindowRef.current?.close();
+      unlistenPromise.then((fn) => fn());
     };
-  }, []);
+  }, [setSessionValid, setSchoolId]);
+
+  // Auto-advance when auth is done and school detected
+  useEffect(() => {
+    if (authState === "success" && schoolId) {
+      const timer = setTimeout(() => setScreen("children_setup"), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [authState, schoolId, setScreen]);
 
   const startAuth = useCallback(async () => {
-    setAuthState("idle");
+    console.log("[AUTH] startAuth called");
     setError(null);
-
-    // First check if session is already valid
-    try {
-      const valid = await api.checkSession();
-      if (valid) {
-        setAuthState("success");
-        setSessionValid(true);
-        return;
-      }
-    } catch {
-      // Proceed to login
-    }
-
     setAuthState("waiting");
 
     try {
-      const loginUrl = await api.getLoginUrl();
-
-      // Open a new Tauri webview window for login
-      const authWindow = new WebviewWindow("auth-login", {
-        url: loginUrl,
-        title: "Sign in to Transparent Classroom",
-        width: 800,
-        height: 700,
-        center: true,
-        resizable: true,
-      });
-
-      authWindowRef.current = authWindow;
-
-      // Poll the auth window's URL to detect successful login
-      pollerRef.current = setInterval(async () => {
-        try {
-          // Execute JS in the auth window to check URL and get cookies
-          // We detect auth success when the URL no longer contains /sign_in
-          const result = await authWindow.emit("check-auth");
-
-          // Alternative: use tauri's webview eval to get the URL
-          // For now, we'll use a JS injection approach
-        } catch {
-          // Window may have been closed
-        }
-      }, 2000);
-
-      // Listen for the window being closed
-      authWindow.onCloseRequested(async () => {
-        if (pollerRef.current) clearInterval(pollerRef.current);
-
-        // Try to validate the session after the window closes
-        setAuthState("validating");
-        try {
-          const valid = await api.checkSession();
-          if (valid) {
-            setAuthState("success");
-            setSessionValid(true);
-          } else {
-            setAuthState("failed");
-            setError("Login was not completed. Please try again.");
-          }
-        } catch (e: unknown) {
-          setAuthState("failed");
-          const msg = e instanceof Error ? e.message : String(e);
-          setError(`Session validation failed: ${msg}`);
-        }
-      });
+      console.log("[AUTH] calling openAuthWindow...");
+      await api.openAuthWindow();
+      console.log("[AUTH] openAuthWindow resolved OK");
     } catch (e: unknown) {
+      console.error("[AUTH] openAuthWindow FAILED:", e);
       setAuthState("failed");
       const msg = e instanceof Error ? e.message : String(e);
       setError(`Failed to open login window: ${msg}`);
     }
-  }, [setSessionValid]);
-
-  const handleNext = () => {
-    setScreen("scan_review");
-  };
+  }, []);
 
   return (
     <motion.div
@@ -113,7 +79,8 @@ export function AuthConnect() {
           Sign In
         </h1>
         <p className="mt-1 text-sm text-zinc-400">
-          Authenticate with Transparent Classroom to access your photos.
+          Sign in to Transparent Classroom. The URL bar in the login window
+          shows the current page address.
         </p>
       </div>
 
@@ -126,7 +93,7 @@ export function AuthConnect() {
               </svg>
             </div>
             <p className="mb-4 text-sm text-zinc-400">
-              A browser window will open. Sign in with your TC account.
+              A browser window will open for you to sign in.
             </p>
             <button onClick={startAuth} className="btn-accent">
               Open Login Window
@@ -143,17 +110,11 @@ export function AuthConnect() {
               Waiting for login...
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              Complete sign-in in the browser window, then close it.
+              Complete sign-in in the browser window.
             </p>
-          </div>
-        )}
-
-        {authState === "validating" && (
-          <div className="text-center">
-            <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900">
-              <div className="h-6 w-6 animate-spin rounded-full border-2 border-zinc-500 border-t-transparent" />
-            </div>
-            <p className="text-sm text-zinc-300">Validating session...</p>
+            <button onClick={startAuth} className="mt-4 btn-secondary text-xs">
+              Re-open Window
+            </button>
           </div>
         )}
 
@@ -165,8 +126,13 @@ export function AuthConnect() {
               </svg>
             </div>
             <p className="text-sm font-medium text-emerald-300">
-              Authenticated successfully
+              Authenticated{schoolId ? ` — School: ${schoolId}` : ""}
             </p>
+            {!schoolId && (
+              <p className="mt-1 text-xs text-zinc-500">
+                Detecting school ID from URL...
+              </p>
+            )}
           </div>
         )}
 
@@ -177,25 +143,12 @@ export function AuthConnect() {
                 <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
               </svg>
             </div>
-            {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
+            {error && <p className="mb-4 max-w-sm text-sm text-red-400">{error}</p>}
             <button onClick={startAuth} className="btn-secondary">
               Retry Login
             </button>
           </div>
         )}
-      </div>
-
-      <div className="mt-8 flex justify-between">
-        <button onClick={() => setScreen("destination")} className="btn-secondary">
-          Back
-        </button>
-        <button
-          onClick={handleNext}
-          disabled={authState !== "success"}
-          className="btn-primary"
-        >
-          Next
-        </button>
       </div>
     </motion.div>
   );

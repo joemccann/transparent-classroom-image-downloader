@@ -40,7 +40,7 @@ export function Settings() {
   };
 
   const handleReset = () => {
-    setScreen("onboarding");
+    setScreen("auth");
   };
 
   return (

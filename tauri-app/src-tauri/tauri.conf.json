@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "bash scripts/clean-dev.sh && npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {
@@ -26,22 +26,9 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' https://s3.amazonaws.com https://*.transparentclassroom.com data:; connect-src 'self' https://www.transparentclassroom.com https://s3.amazonaws.com ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' https://s3.amazonaws.com https://*.transparentclassroom.com data: blob:; connect-src 'self' https://*.transparentclassroom.com https://s3.amazonaws.com ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
     }
   },
-  "plugins": {
-    "dialog": {
-      "open": true,
-      "save": false
-    },
-    "fs": {
-      "scope": {
-        "allow": ["$HOME/**", "$APPDATA/**", "$DOWNLOAD/**"],
-        "deny": []
-      }
-    },
-    "shell": {
-      "open": true
-    }
-  }
+  "plugins": {}
+
 }
