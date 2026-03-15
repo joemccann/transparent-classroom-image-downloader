@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
+  "productName": "TC Photo Downloader",
+  "identifier": "com.tc-downloader.app",
+  "version": "0.1.0",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "TC Photo Downloader",
+        "width": 900,
+        "height": 680,
+        "minWidth": 720,
+        "minHeight": 520,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' https://s3.amazonaws.com https://*.transparentclassroom.com data:; connect-src 'self' https://www.transparentclassroom.com https://s3.amazonaws.com ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "plugins": {
+    "dialog": {
+      "open": true,
+      "save": false
+    },
+    "fs": {
+      "scope": {
+        "allow": ["$HOME/**", "$APPDATA/**", "$DOWNLOAD/**"],
+        "deny": []
+      }
+    },
+    "shell": {
+      "open": true
+    }
+  }
+}
