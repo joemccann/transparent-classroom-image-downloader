@@ -55,7 +55,7 @@ Copy `.env.example` to `.env` and fill in the required values:
 ```env
 # Required
 SCHOOL_ID=12345
-CHILDREN=Cole:322263,Isla:598458
+CHILDREN=Alice:123456,Bob:789012
 OUTPUT_DIR=~/Downloads/Photos
 ```
 
